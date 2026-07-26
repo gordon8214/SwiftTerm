@@ -1521,10 +1521,10 @@ open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollVi
         // Let the gesture own contentOffset while the finger is physically down
         // (isTracking), and while frozen history coasts under momentum —
         // re-asserting it there fights the drag and blocks the user from reaching
-        // the bottom. But when following the bottom (userScrolling == false) we
-        // must keep pinning to the bottom even during deceleration: otherwise
-        // streaming output grows the content faster than the coasting offset, the
-        // tail pulls away, and the view falls behind the live output.
+        // the bottom. But when following live output (userScrolling == false)
+        // we must keep the caret visible even during deceleration: otherwise
+        // streaming output grows the content faster than the coasting offset,
+        // the tail pulls away, and the view falls behind the live output.
         //
         // NOTE: isTracking (finger down), not isDragging — on device isDragging
         // stays true through the whole momentum coast, so it cannot distinguish
@@ -1541,13 +1541,12 @@ open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollVi
             // past the last line.
             offsetY = min (rowOffset + manualScrollOffsetWithinRow, maxContentOffsetY ())
         } else {
-            // Following the tail: rest flush against the bottom of the
-            // *unobscured* region. maxContentOffsetY() already folds in
-            // adjustedContentInset.bottom, so this is the offset that leaves the
-            // last line just above a software keyboard / safe area, whereas
-            // yDisp * cellHeight undershoots it by exactly that inset and parks
-            // the final rows — including the caret — behind the keyboard.
-            offsetY = maxContentOffsetY ()
+            // Following live output: move only far enough to keep the caret in
+            // the unobscured region. When the caret is on the final buffer row
+            // this is the keyboard-adjusted bottom pin. When a fresh full-height
+            // grid has its prompt near the top, it leaves the prompt in place
+            // instead of scrolling down into blank rows below it.
+            offsetY = caretVisibleContentOffsetY ()
         }
         setContentOffsetFromTerminal(CGPoint (x: 0, y: offsetY))
         //Xscroller.doubleValue = scrollPosition
@@ -1597,6 +1596,39 @@ open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollVi
     /// disengage the freeze — even by overscrolling.
     private func maxContentOffsetY() -> CGFloat {
         max(0, contentSize.height - bounds.height + adjustedContentInset.bottom)
+    }
+
+    /// Returns the smallest offset change that brings the caret cell inside
+    /// the unobscured portion of the scroll view. If the caret is already
+    /// visible, the current offset is preserved.
+    ///
+    /// A host can keep the terminal grid at its full height and represent a
+    /// software keyboard as `contentInset.bottom`. In that arrangement,
+    /// blindly following `maxContentOffsetY()` scrolls a top-row prompt into
+    /// otherwise blank grid rows. Moving relative to the caret keeps that
+    /// prompt visible while still producing the exact bottom-follow offset
+    /// once streaming output reaches the last buffer row.
+    private func caretVisibleContentOffsetY() -> CGFloat {
+        let displayBuffer = terminal.displayBuffer
+        let caretTop = CGFloat(displayBuffer.yBase + displayBuffer.y) * cellDimension.height
+        let caretBottom = caretTop + cellDimension.height
+        let currentOffset = clampedContentOffsetY(contentOffset.y)
+        let visibleTop = currentOffset + adjustedContentInset.top
+        let visibleBottom = currentOffset + bounds.height - adjustedContentInset.bottom
+
+        if caretTop < visibleTop {
+            return clampedContentOffsetY(caretTop - adjustedContentInset.top)
+        }
+        if caretBottom > visibleBottom {
+            return clampedContentOffsetY(
+                caretBottom - bounds.height + adjustedContentInset.bottom
+            )
+        }
+        return currentOffset
+    }
+
+    private func clampedContentOffsetY(_ offset: CGFloat) -> CGFloat {
+        min(max(offset, -adjustedContentInset.top), maxContentOffsetY())
     }
 
     private func setContentOffsetFromTerminal(_ newContentOffset: CGPoint) {
@@ -2485,10 +2517,11 @@ open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollVi
         if userScrolling || terminal.userScrolling || realCaret >= viewportEnd || realCaret < displayBuffer.yDisp {
             resetManualScrollTracking()
         }
-        // Always re-run the pin, even when already following with the caret in
-        // the row viewport: the caller may have just changed contentInset (a
-        // software keyboard opening over an idle full-screen TUI), and only
-        // updateScroller() knows where the unobscured bottom now sits.
+        // Always re-run the caret-visible placement, even when the terminal's
+        // row viewport already contains the caret: the caller may have just
+        // changed contentInset (a software keyboard opening over an idle
+        // full-screen grid), which changes the unobscured point-space viewport
+        // without changing yDisp or the terminal's row count.
         updateScroller()
     }
 
