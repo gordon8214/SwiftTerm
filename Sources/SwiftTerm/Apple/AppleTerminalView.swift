@@ -1791,6 +1791,17 @@ extension TerminalView {
         if terminal.synchronizedOutputActive {
             return
         }
+        #if os(iOS) || os(visionOS)
+        // Re-assert the follow position against the settled buffer. Scroll
+        // notifications fire mid-feed, so the offset they compute can describe a
+        // state the frame has already moved on from — rows a redraw erased but has
+        // not repainted yet, or a cursor still parked where the renderer left it
+        // between two writes. And output that repaints rows without scrolling
+        // fires no notification at all, so nothing would revisit the position.
+        // updateScroller() bails while the finger is down or frozen history is
+        // coasting, so this cannot fight a gesture.
+        updateScroller()
+        #endif
         updateCursorPosition()
         guard let (rowStart, rowEnd) = terminal.getUpdateRange () else {
             if notifyUpdateChanges {

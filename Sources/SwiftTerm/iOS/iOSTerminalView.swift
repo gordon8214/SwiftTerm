@@ -1516,8 +1516,13 @@ open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollVi
     func updateScroller ()
     {
         let displayBuffer = terminal.displayBuffer
-        contentSize = CGSize (width: CGFloat (displayBuffer.cols) * cellDimension.width,
-                              height: CGFloat (displayBuffer.lines.count) * cellDimension.height)
+        let newContentSize = CGSize (width: CGFloat (displayBuffer.cols) * cellDimension.width,
+                                     height: CGFloat (displayBuffer.lines.count) * cellDimension.height)
+        // Assigning an unchanged contentSize still invalidates the scroll view's
+        // layout, and this runs on every display frame.
+        if contentSize != newContentSize {
+            contentSize = newContentSize
+        }
         // Let the gesture own contentOffset while the finger is physically down
         // (isTracking), and while frozen history coasts under momentum —
         // re-asserting it there fights the drag and blocks the user from reaching
@@ -1541,12 +1546,11 @@ open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollVi
             // past the last line.
             offsetY = min (rowOffset + manualScrollOffsetWithinRow, maxContentOffsetY ())
         } else {
-            // Following live output: move only far enough to keep the painted
-            // tail of the buffer in the unobscured region. When output has
-            // reached the final buffer row this is the keyboard-adjusted bottom
-            // pin. When a fresh full-height grid has its prompt near the top, it
-            // leaves the prompt in place instead of scrolling down into blank
-            // rows below it.
+            // Following live output: rest the painted tail of the buffer against
+            // the bottom of the unobscured region. When output has reached the
+            // final buffer row this is the keyboard-adjusted bottom pin. When a
+            // fresh full-height grid has its prompt near the top, it leaves the
+            // prompt in place instead of scrolling down into blank rows below it.
             offsetY = followContentOffsetY ()
         }
         setContentOffsetFromTerminal(CGPoint (x: 0, y: offsetY))
@@ -1589,55 +1593,62 @@ open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollVi
     /// The largest resting `contentOffset.y` the scroll view can actually reach.
     /// This is smaller than `maxDisplayRow * cellHeight` by the partial-row
     /// remainder whenever the viewport height is not an exact multiple of the
-    /// cell height, so it — not the row offset — is the true "bottom" of the
-    /// content for both follow-mode positioning and at-bottom detection. The
-    /// `adjustedContentInset.bottom` term matches UIScrollView's own clamp: with
-    /// a bottom inset (accessory view, safe area, keyboard) the resting maximum
-    /// shifts, and ignoring it left the user unable to ever reach the bottom to
-    /// disengage the freeze — even by overscrolling.
+    /// cell height, so it — not the row offset — is the bottom of the *allocated*
+    /// content. The resting place of follow mode is `followContentOffsetY()`,
+    /// which is this value only once output has reached the final buffer row.
+    /// The `adjustedContentInset.bottom` term matches UIScrollView's own clamp:
+    /// with a bottom inset (accessory view, safe area, keyboard) the resting
+    /// maximum shifts, and ignoring it left the user unable to ever reach the
+    /// bottom to disengage the freeze — even by overscrolling.
     private func maxContentOffsetY() -> CGFloat {
         max(0, contentSize.height - bounds.height + adjustedContentInset.bottom)
     }
 
-    /// Returns the smallest offset change that brings the painted tail of the
-    /// buffer inside the unobscured portion of the scroll view. If it is already
-    /// visible, the current offset is preserved.
+    /// The offset that rests the painted tail of the buffer against the bottom
+    /// of the unobscured portion of the scroll view. This is where follow mode
+    /// lives, and the position "am I at the bottom" is measured against.
     ///
     /// A host can keep the terminal grid at its full height and represent a
     /// software keyboard as `contentInset.bottom`. In that arrangement, blindly
     /// following `maxContentOffsetY()` scrolls a top-row prompt into otherwise
     /// blank grid rows, so the anchor is the last row that actually has
     /// something painted on it rather than the last row the buffer happens to
-    /// allocate.
+    /// allocate. Once output reaches the final row the two coincide.
     ///
-    /// The anchor is deliberately *not* the caret: a full-screen TUI parks the
-    /// cursor on its input line and paints a status area underneath, and a shell
-    /// can leave output below the cursor. Anchoring on the caret there stops
-    /// short of the real bottom by exactly the rows below it, so live output
-    /// printed into those rows never scrolls into view.
+    /// The anchor is at least the caret row but is otherwise *not* the caret: a
+    /// full-screen TUI parks the cursor on its input line and paints a status
+    /// area underneath, and a shell can leave output below the cursor. Anchoring
+    /// on the caret there stops short of the real bottom by exactly the rows
+    /// below it, so live output printed into those rows never scrolls into view.
+    ///
+    /// Deliberately a pure function of the terminal state and the view geometry:
+    /// the current `contentOffset` is not an input. An earlier version moved
+    /// "only as far as needed" from wherever the view happened to be, which made
+    /// the resting position depend on the transient buffer state at whichever
+    /// output event last ran it. A frame that momentarily left blank rows below
+    /// the caret, or a keyboard opening while the cursor was parked at the top
+    /// of the grid, could park the viewport above the live output and keep it
+    /// there: every later frame saw the painted tail already inside the viewport
+    /// and preserved the stale offset instead of correcting it.
     private func followContentOffsetY() -> CGFloat {
         let displayBuffer = terminal.displayBuffer
-        let caretRow = displayBuffer.yBase + displayBuffer.y
-        let caretTop = CGFloat(caretRow) * cellDimension.height
-        let paintedBottom = CGFloat(lastPaintedRow(in: displayBuffer, atOrBelow: caretRow) + 1)
-            * cellDimension.height
-        let currentOffset = clampedContentOffsetY(contentOffset.y)
-        let visibleTop = currentOffset + adjustedContentInset.top
-        let visibleBottom = currentOffset + bounds.height - adjustedContentInset.bottom
+        let anchorRow = lastPaintedRow(
+            in: displayBuffer,
+            atOrBelow: displayBuffer.yBase + displayBuffer.y
+        )
+        let anchorBottom = CGFloat(anchorRow + 1) * cellDimension.height
+        return clampedContentOffsetY(
+            anchorBottom - bounds.height + adjustedContentInset.bottom
+        )
+    }
 
-        if paintedBottom > visibleBottom {
-            // Revealing rows below the caret must never push the caret itself
-            // off the top, so cap the bottom pin at the offset that rests the
-            // caret against the unobscured top. The cap only binds when the
-            // painted span below the caret exceeds the whole visible region.
-            let bottomPin = paintedBottom - bounds.height + adjustedContentInset.bottom
-            let caretTopPin = caretTop - adjustedContentInset.top
-            return clampedContentOffsetY(min(bottomPin, caretTopPin))
-        }
-        if caretTop < visibleTop {
-            return clampedContentOffsetY(caretTop - adjustedContentInset.top)
-        }
-        return currentOffset
+    /// Whether `offset` has reached the resting place of follow mode, within
+    /// half a row. A sub-pixel tolerance was too tight — fractional cell heights
+    /// and contentInset rounding left the user a hair short of the exact target,
+    /// so the freeze never disengaged.
+    private func isAtFollowBottom(_ offset: CGFloat) -> Bool {
+        let tolerance = max(contentOffsetTolerance, cellDimension.height / 2)
+        return offset >= followContentOffsetY() - tolerance
     }
 
     /// The bottom-most buffer row at or below `row` that has content painted on
@@ -1693,8 +1704,7 @@ open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollVi
 
         let displayBuffer = terminal.displayBuffer
         terminal.setViewYDisp(maxDisplayRow(in: displayBuffer))
-        let bottomOffset = min(CGFloat(displayBuffer.yDisp) * cellDimension.height, maxContentOffsetY())
-        setContentOffsetFromTerminal(CGPoint(x: 0, y: bottomOffset))
+        setContentOffsetFromTerminal(CGPoint(x: 0, y: followContentOffsetY()))
     }
 
     private func syncYDispFromContentOffset() {
@@ -1707,12 +1717,15 @@ open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollVi
         let maxContentOffset = maxContentOffsetY()
         let offsetY = min(max(contentOffset.y, 0), maxContentOffset)
 
-        // A drag that lands within half a row of the bottom (or overscrolls past
-        // it) re-engages auto-follow. A sub-pixel tolerance was too tight —
-        // fractional cell heights and contentInset rounding left the user a hair
-        // short of the exact maximum, so the freeze never disengaged.
-        let atBottomThreshold = max(contentOffsetTolerance, cellDimension.height / 2)
-        if offsetY >= maxContentOffset - atBottomThreshold {
+        // A drag that lands within half a row of where follow mode rests (or
+        // overscrolls past it) re-engages auto-follow. This has to measure
+        // against `followContentOffsetY()`, not `maxContentOffsetY()`: with blank
+        // rows in the buffer's tail the two differ, and follow mode already
+        // parks the view at the former. Measuring against the latter classified
+        // the resting position of a perfectly-followed viewport as "not at the
+        // bottom", so the first finger contact that nudged contentOffset froze
+        // history at that row and the view stopped following live output.
+        if isAtFollowBottom(offsetY) {
             if displayBuffer.yDisp != maxRow {
                 terminal.setViewYDisp(maxRow)
             }
