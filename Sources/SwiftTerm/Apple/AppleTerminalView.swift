@@ -286,7 +286,9 @@ extension TerminalView {
     {
         // Only wide cells need adjusting: a single-width glyph in a monospace
         // font already fills its cell, so we skip the metric lookups entirely.
-        guard columnWidth >= 2, cellDimension != nil else { return .identity }
+        // `cellDimension` is a non-optional CGSize, so the guard it needs is
+        // "has it been measured yet", not a nil check.
+        guard columnWidth >= 2, cellDimension.width > 0, cellDimension.height > 0 else { return .identity }
 
         let cellWidth = cellDimension.width
         let cellHeight = cellDimension.height
