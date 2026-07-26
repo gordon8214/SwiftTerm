@@ -1522,9 +1522,9 @@ open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollVi
         // (isTracking), and while frozen history coasts under momentum —
         // re-asserting it there fights the drag and blocks the user from reaching
         // the bottom. But when following live output (userScrolling == false)
-        // we must keep the caret visible even during deceleration: otherwise
-        // streaming output grows the content faster than the coasting offset,
-        // the tail pulls away, and the view falls behind the live output.
+        // we must keep the painted tail visible even during deceleration:
+        // otherwise streaming output grows the content faster than the coasting
+        // offset, the tail pulls away, and the view falls behind the live output.
         //
         // NOTE: isTracking (finger down), not isDragging — on device isDragging
         // stays true through the whole momentum coast, so it cannot distinguish
@@ -1541,12 +1541,13 @@ open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollVi
             // past the last line.
             offsetY = min (rowOffset + manualScrollOffsetWithinRow, maxContentOffsetY ())
         } else {
-            // Following live output: move only far enough to keep the caret in
-            // the unobscured region. When the caret is on the final buffer row
-            // this is the keyboard-adjusted bottom pin. When a fresh full-height
-            // grid has its prompt near the top, it leaves the prompt in place
-            // instead of scrolling down into blank rows below it.
-            offsetY = caretVisibleContentOffsetY ()
+            // Following live output: move only far enough to keep the painted
+            // tail of the buffer in the unobscured region. When output has
+            // reached the final buffer row this is the keyboard-adjusted bottom
+            // pin. When a fresh full-height grid has its prompt near the top, it
+            // leaves the prompt in place instead of scrolling down into blank
+            // rows below it.
+            offsetY = followContentOffsetY ()
         }
         setContentOffsetFromTerminal(CGPoint (x: 0, y: offsetY))
         //Xscroller.doubleValue = scrollPosition
@@ -1598,33 +1599,66 @@ open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollVi
         max(0, contentSize.height - bounds.height + adjustedContentInset.bottom)
     }
 
-    /// Returns the smallest offset change that brings the caret cell inside
-    /// the unobscured portion of the scroll view. If the caret is already
+    /// Returns the smallest offset change that brings the painted tail of the
+    /// buffer inside the unobscured portion of the scroll view. If it is already
     /// visible, the current offset is preserved.
     ///
     /// A host can keep the terminal grid at its full height and represent a
-    /// software keyboard as `contentInset.bottom`. In that arrangement,
-    /// blindly following `maxContentOffsetY()` scrolls a top-row prompt into
-    /// otherwise blank grid rows. Moving relative to the caret keeps that
-    /// prompt visible while still producing the exact bottom-follow offset
-    /// once streaming output reaches the last buffer row.
-    private func caretVisibleContentOffsetY() -> CGFloat {
+    /// software keyboard as `contentInset.bottom`. In that arrangement, blindly
+    /// following `maxContentOffsetY()` scrolls a top-row prompt into otherwise
+    /// blank grid rows, so the anchor is the last row that actually has
+    /// something painted on it rather than the last row the buffer happens to
+    /// allocate.
+    ///
+    /// The anchor is deliberately *not* the caret: a full-screen TUI parks the
+    /// cursor on its input line and paints a status area underneath, and a shell
+    /// can leave output below the cursor. Anchoring on the caret there stops
+    /// short of the real bottom by exactly the rows below it, so live output
+    /// printed into those rows never scrolls into view.
+    private func followContentOffsetY() -> CGFloat {
         let displayBuffer = terminal.displayBuffer
-        let caretTop = CGFloat(displayBuffer.yBase + displayBuffer.y) * cellDimension.height
-        let caretBottom = caretTop + cellDimension.height
+        let caretRow = displayBuffer.yBase + displayBuffer.y
+        let caretTop = CGFloat(caretRow) * cellDimension.height
+        let paintedBottom = CGFloat(lastPaintedRow(in: displayBuffer, atOrBelow: caretRow) + 1)
+            * cellDimension.height
         let currentOffset = clampedContentOffsetY(contentOffset.y)
         let visibleTop = currentOffset + adjustedContentInset.top
         let visibleBottom = currentOffset + bounds.height - adjustedContentInset.bottom
 
+        if paintedBottom > visibleBottom {
+            // Revealing rows below the caret must never push the caret itself
+            // off the top, so cap the bottom pin at the offset that rests the
+            // caret against the unobscured top. The cap only binds when the
+            // painted span below the caret exceeds the whole visible region.
+            let bottomPin = paintedBottom - bounds.height + adjustedContentInset.bottom
+            let caretTopPin = caretTop - adjustedContentInset.top
+            return clampedContentOffsetY(min(bottomPin, caretTopPin))
+        }
         if caretTop < visibleTop {
             return clampedContentOffsetY(caretTop - adjustedContentInset.top)
         }
-        if caretBottom > visibleBottom {
-            return clampedContentOffsetY(
-                caretBottom - bounds.height + adjustedContentInset.bottom
-            )
-        }
         return currentOffset
+    }
+
+    /// The bottom-most buffer row at or below `row` that has content painted on
+    /// it. Rows the terminal allocated but never drew into — the blank tail of a
+    /// grid whose prompt is still near the top — are excluded so follow mode
+    /// does not scroll down into them.
+    ///
+    /// The scan walks up from the last buffer row and stops at `row`, so the
+    /// streaming case that matters for throughput — output already sitting on
+    /// the last row — inspects no lines at all.
+    private func lastPaintedRow(in buffer: Buffer, atOrBelow row: Int) -> Int {
+        let lines = buffer.lines
+        var candidate = lines.count - 1
+        while candidate > row {
+            let line = lines[candidate]
+            if line.getTrimmedLength() > 0 || line.images?.isEmpty == false {
+                return candidate
+            }
+            candidate -= 1
+        }
+        return row
     }
 
     private func clampedContentOffsetY(_ offset: CGFloat) -> CGFloat {
@@ -2517,11 +2551,11 @@ open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollVi
         if userScrolling || terminal.userScrolling || realCaret >= viewportEnd || realCaret < displayBuffer.yDisp {
             resetManualScrollTracking()
         }
-        // Always re-run the caret-visible placement, even when the terminal's
-        // row viewport already contains the caret: the caller may have just
-        // changed contentInset (a software keyboard opening over an idle
-        // full-screen grid), which changes the unobscured point-space viewport
-        // without changing yDisp or the terminal's row count.
+        // Always re-run the follow placement, even when the terminal's row
+        // viewport already contains the caret: the caller may have just changed
+        // contentInset (a software keyboard opening over an idle full-screen
+        // grid), which changes the unobscured point-space viewport without
+        // changing yDisp or the terminal's row count.
         updateScroller()
     }
 

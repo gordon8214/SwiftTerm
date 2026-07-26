@@ -71,6 +71,46 @@ final class IOSTerminalKeyboardScrollTests: XCTestCase {
         assertCaretIsVisible(in: view)
     }
 
+    /// A full-screen TUI parks the cursor on its input line and paints a status
+    /// area underneath it. Following the caret alone stops short of the real
+    /// bottom by exactly the rows below the cursor, so output painted there
+    /// never scrolls into view.
+    func testFollowingRevealsPaintedRowsBelowTheCaret() {
+        let view = makeView()
+        let rows = view.terminal.rows
+        view.terminal.feed(text: String(repeating: "history\r\n", count: rows * 2))
+        view.updateScroller()
+
+        // Paint the last two grid rows, then park the caret two rows above the
+        // bottom — CUP rows are 1-based, so `rows` addresses the final row.
+        view.terminal.feed(text: "\u{1b}[\(rows - 1);1Hstatus\u{1b}[\(rows);1Hfooter")
+        view.terminal.feed(text: "\u{1b}[\(rows - 2);1H")
+
+        view.contentInset.bottom = 350
+        view.ensureCaretIsVisible()
+
+        let expectedBottom = max(
+            0,
+            view.contentSize.height - view.bounds.height + view.adjustedContentInset.bottom
+        )
+        XCTAssertEqual(view.contentOffset.y, expectedBottom, accuracy: 0.001)
+    }
+
+    /// The blank tail of a grid whose prompt is still near the top must stay
+    /// excluded from the anchor, otherwise the prompt scrolls out of view.
+    func testFollowingIgnoresTheBlankTailBelowAShortPrompt() {
+        let view = makeView()
+        view.terminal.feed(text: "history\r\nprompt> ")
+        view.updateScroller()
+        let originalOffset = view.contentOffset.y
+
+        view.contentInset.bottom = 350
+        view.ensureCaretIsVisible()
+
+        XCTAssertEqual(view.contentOffset.y, originalOffset, accuracy: 0.001)
+        assertCaretIsVisible(in: view)
+    }
+
     private func assertCaretIsVisible(
         in view: TerminalView,
         file: StaticString = #filePath,
