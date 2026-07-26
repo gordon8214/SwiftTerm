@@ -360,17 +360,56 @@ extension TerminalView: UITextInput {
         return result
     }
             
+    /// The on-screen rect of the terminal cursor cell, clamped to the
+    /// currently visible portion of the scroll view. UIKit uses the rects
+    /// returned from `firstRect(for:)` / `caretRect(for:)` to place IME
+    /// candidate popovers, dictation UI, and to drive caret-based
+    /// scroll-into-view behavior — returning `bounds` (the whole terminal)
+    /// makes all of those anchor to the wrong place.
+    func textInputCursorAnchorRect() -> CGRect {
+        let buffer = terminal.displayBuffer
+        let fallbackSize = CGSize(width: max(cellDimension.width, 1), height: max(cellDimension.height, 1))
+        guard buffer.lines.count > 0 else {
+            return CGRect(origin: bounds.origin, size: fallbackSize)
+        }
+        let cursorRow = max(0, min(buffer.lines.count - 1, buffer.yBase + buffer.y))
+        // Double-width/double-height rows (DECDWL/DECDHL) render each cell
+        // at twice the width; mirror updateCursorPosition's doublePosition
+        // factor so the anchor lands on the caret, not at half its x.
+        let doublePosition: CGFloat = buffer.lines[cursorRow].renderMode == .single ? 1.0 : 2.0
+        let cellWidth = cellDimension.width * doublePosition
+        let cursorX = CGFloat(buffer.x) * cellWidth
+        let cursorY = CGFloat(cursorRow) * cellDimension.height
+        // For a UIScrollView, bounds.origin IS contentOffset, so the
+        // bounds min/max already describe the visible region in content
+        // space on both axes. Inset by adjustedContentInset so the anchor
+        // stays clear of keyboard-occluded rows when the host applies a
+        // bottom contentInset.
+        var visibleBounds = bounds.inset(by: adjustedContentInset)
+        if visibleBounds.isEmpty {
+            visibleBounds = bounds
+        }
+        let maxX = max(visibleBounds.minX, visibleBounds.maxX - cellWidth)
+        let maxY = max(visibleBounds.minY, visibleBounds.maxY - cellDimension.height)
+        return CGRect(
+            x: min(max(cursorX, visibleBounds.minX), maxX),
+            y: min(max(cursorY, visibleBounds.minY), maxY),
+            width: max(cellWidth, 1),
+            height: max(cellDimension.height, 1)
+        )
+    }
+
     public func firstRect(for range: UITextRange) -> CGRect {
-        return bounds
+        return textInputCursorAnchorRect()
     }
-    
+
     public func caretRect(for position: UITextPosition) -> CGRect {
-        return bounds
+        return textInputCursorAnchorRect()
     }
-    
+
     public func selectionRects(for range: UITextRange) -> [UITextSelectionRect] {
         guard let r = range as? TextRange else { return [] }
-        return [TextSelectionRect(rect: bounds, range: r, string: textInputStorage)]
+        return [TextSelectionRect(rect: textInputCursorAnchorRect(), range: r, string: textInputStorage)]
     }
     
     // These can be exercised by the hold-spacebar
