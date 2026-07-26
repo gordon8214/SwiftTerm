@@ -684,7 +684,12 @@ extension TerminalView {
     //
     // Given a line of text with attributes, returns column-aware segments that can be drawn later.
     //
-    func buildAttributedString (row: Int, line: BufferLine, cols: Int) -> ViewLineInfo
+    /// - Parameter includePredictions: when `false`, the speculative-echo
+    ///   overlay is not composited. Assistive technology must read the
+    ///   authoritative buffer only: predicted characters have not been confirmed
+    ///   by the remote and may be retracted, so announcing them would tell a
+    ///   VoiceOver user the command line contains text that never existed.
+    func buildAttributedString (row: Int, line: BufferLine, cols: Int, includePredictions: Bool = true) -> ViewLineInfo
     {
         var segments: [ViewLineSegment] = []
         let selectionColumns = selectedColumnsRange(row: row, cols: cols)
@@ -711,7 +716,12 @@ extension TerminalView {
         }
 
         while col < cols {
-            let ch: CharData = line[col]
+            let baseCell = line[col]
+            // Speculative-echo overlay: composite predicted cells over the
+            // authoritative buffer at render time only (never mutates `line`).
+            let ch: CharData = (includePredictions
+                                ? terminal.predictedCharData(absoluteRow: row, col: col, base: baseCell)
+                                : nil) ?? baseCell
             let width = max(1, Int(ch.width))
             let attr = ch.attribute
             let hasUrl = shouldUnderlineLink(row: row, column: col, width: width, cell: ch)
@@ -1866,8 +1876,12 @@ extension TerminalView {
         //let lineOrigin = CGPoint(x: 0, y: frame.height - (cellDimension.height * (CGFloat(terminal.buffer.y - terminal.buffer.yDisp + 1))))
         //caretView.frame.origin = CGPoint(x: lineOrigin.x + (cellDimension.width * CGFloat(terminal.buffer.x)), y: lineOrigin.y)
         let buffer = terminal.displayBuffer
-        let vy = buffer.yBase + buffer.y
-        
+
+        // Leads the caret to the speculative-echo cursor while predictions are
+        // outstanding; otherwise this is just the real cursor.
+        let (cursorColumn, cursorRowViewport) = terminal.displayCursorLocation ()
+        let vy = buffer.yBase + cursorRowViewport
+
         if vy >= buffer.yDisp + buffer.rows {
             caretView.removeFromSuperview()
             return
@@ -1876,21 +1890,64 @@ extension TerminalView {
         } else if terminal.cursorHidden == true && caretView.superview == self {
             caretView.removeFromSuperview()
         }
-        let doublePosition = buffer.lines [vy].renderMode == .single ? 1.0 : 2.0
+        guard vy >= 0, vy < buffer.lines.count else { return }
+        let caretLine = buffer.lines [vy]
+        // A predicted cursor can rest one past the last column (pending wrap),
+        // which has no cell to draw over — clamp it back onto the last column so
+        // the caret stays on screen, matching the Metal cursor.
+        let caretColumn = max (0, min (cursorColumn, caretLine.count - 1))
+        let doublePosition = caretLine.renderMode == .single ? 1.0 : 2.0
         #if os(iOS) || os(visionOS)
-        let offset = (cellDimension.height * (CGFloat(buffer.y+(buffer.yBase))))
+        let offset = (cellDimension.height * (CGFloat(cursorRowViewport+(buffer.yBase))))
         let lineOrigin = CGPoint(x: 0, y: offset)
         #else
-        let offset = (cellDimension.height * (CGFloat(buffer.y-(buffer.yDisp-buffer.yBase)+1)))
+        let offset = (cellDimension.height * (CGFloat(cursorRowViewport-(buffer.yDisp-buffer.yBase)+1)))
         let lineOrigin = CGPoint(x: 0, y: frame.height - offset)
         #endif
-        let charUnderCursor = buffer.lines [vy][buffer.x]
+        let charUnderCursor = caretLine.count > 0 ? caretLine [caretColumn] : CharData.Null
         // Span the caret across the full character so a block cursor covers a
         // full-width (CJK) glyph instead of only its left half.
         let cursorColumnWidth = max(1, Int(charUnderCursor.width))
-        caretView.frame.origin = CGPoint(x: lineOrigin.x + (cellDimension.width * doublePosition * CGFloat(buffer.x)), y: lineOrigin.y)
+        caretView.frame.origin = CGPoint(x: lineOrigin.x + (cellDimension.width * doublePosition * CGFloat(caretColumn)), y: lineOrigin.y)
         caretView.frame.size.width = cellDimension.width * doublePosition * CGFloat(cursorColumnWidth)
         caretView.setText (ch: charUnderCursor)
+    }
+
+    // MARK: - Speculative-echo prediction overlay
+
+    /// Installs the speculative-echo overlay: `cells` (viewport coordinates) are
+    /// composited over the authoritative buffer at render time only — the buffer
+    /// is never mutated — and `cursor` leads the caret. Marks the affected rows
+    /// dirty for both the CoreText and Metal renderers and repaints.
+    public func setPredictionOverlay(cells: [Terminal.PredictedCell], cursor: (col: Int, row: Int)?) {
+        let affectedBefore = terminal.predictionOverlay.affectedRows
+        terminal.predictionOverlay.set(cells: cells, cursor: cursor)
+        invalidatePredictionRows(affectedBefore.union(terminal.predictionOverlay.affectedRows))
+    }
+
+    /// Removes the speculative-echo overlay, restoring the authoritative display
+    /// and returning the caret to the real cursor.
+    public func clearPredictionOverlay() {
+        guard !terminal.predictionOverlay.isEmpty else { return }
+        let affected = terminal.predictionOverlay.affectedRows
+        terminal.predictionOverlay.clear()
+        invalidatePredictionRows(affected)
+    }
+
+    private func invalidatePredictionRows(_ viewportRows: Set<Int>) {
+        let displayBuffer = terminal.displayBuffer
+        for viewportRow in viewportRows {
+            let absoluteRow = displayBuffer.yBase + viewportRow
+            if absoluteRow >= 0, absoluteRow < displayBuffer.lines.count {
+                // The overlay does not mutate the line, so its `generation`
+                // would not change — force the Metal per-row cache to rebuild.
+                displayBuffer.lines [absoluteRow].invalidateGeneration()
+            }
+            if viewportRow >= 0, viewportRow < terminal.rows {
+                terminal.updateRange(viewportRow)
+            }
+        }
+        updateDisplay()
     }
     
     // Does not use a default argument and merge, because it is called back

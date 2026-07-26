@@ -2138,13 +2138,21 @@ final class MetalTerminalRenderer: NSObject, MTKViewDelegate {
         if terminalView.terminal.cursorHidden {
             return ([], [], [])
         }
-        let cursorRow = buffer.yBase + buffer.y
+        // Matches the CoreGraphics caret: while a speculative-echo overlay is
+        // installed the cursor leads to the predicted position, so it sits after
+        // the predicted text rather than a round-trip behind it.
+        let (cursorColumn, cursorRowViewport) = terminalView.terminal.displayCursorLocation()
+        let cursorRow = buffer.yBase + cursorRowViewport
         if cursorRow < firstRow || cursorRow > lastRow || cursorRow < 0 || cursorRow >= buffer.lines.count {
             return ([], [], [])
         }
-        if buffer.x < 0 || buffer.x >= buffer.cols {
+        // `cursorColumn == cols` is the pending-wrap position, which has no cell
+        // to draw over — clamp it back onto the last column rather than dropping
+        // the cursor entirely.
+        if cursorColumn < 0 || cursorColumn > buffer.cols {
             return ([], [], [])
         }
+        let cursorDrawColumn = min(cursorColumn, max(0, buffer.cols - 1))
         let cursorStyle = terminalView.terminal.options.cursorStyle
         if isBlinkStyle(cursorStyle) && !cursorBlinkOn {
             return ([], [], [])
@@ -2158,9 +2166,9 @@ final class MetalTerminalRenderer: NSObject, MTKViewDelegate {
         // Span the cursor across the full character so a block/underline cursor
         // covers a full-width (CJK) glyph instead of only its left half, matching
         // the CoreGraphics caret.
-        let cursorColumnWidth = CGFloat(max(1, Int(buffer.lines[cursorRow][buffer.x].width)))
+        let cursorColumnWidth = CGFloat(max(1, Int(buffer.lines[cursorRow][cursorDrawColumn].width)))
 
-        let x0 = lineOriginPx.x + CGFloat(buffer.x) * cellWidthPx * doublePosition
+        let x0 = lineOriginPx.x + CGFloat(cursorDrawColumn) * cellWidthPx * doublePosition
         let y0 = lineOriginPx.y
         let x1 = x0 + cellWidthPx * doublePosition * cursorColumnWidth
         let y1 = y0 + cellHeightPx
@@ -2226,7 +2234,7 @@ final class MetalTerminalRenderer: NSObject, MTKViewDelegate {
                                                           color: cursorColor))
         }
 
-        let charData = buffer.lines[cursorRow][buffer.x]
+        let charData = buffer.lines[cursorRow][cursorDrawColumn]
         let caretTextColor = terminalView.caretTextColor ?? terminalView.nativeForegroundColor
         let attributes = terminalView.getAttributedValue(charData.attribute,
                                                          usingFg: terminalView.caretColor,
@@ -2268,7 +2276,7 @@ final class MetalTerminalRenderer: NSObject, MTKViewDelegate {
                 // Center the glyph under the cursor the same way as normal text so
                 // a full-width (CJK) character doesn't shift when the caret lands on it.
                 let fit = terminalView.glyphSlotFit(font: ctFont, glyph: glyph, columnWidth: max(1, Int(charData.width)))
-                let basePos = CGPoint(x: lineOrigin.x + cellWidth * doublePosition * CGFloat(buffer.x) + fit.dx * doublePosition,
+                let basePos = CGPoint(x: lineOrigin.x + cellWidth * doublePosition * CGFloat(cursorDrawColumn) + fit.dx * doublePosition,
                                       y: lineOrigin.y + yOffset + ctPos.y + fit.dy)
                 let pxX = basePos.x * scale + entry.bearing.x * fit.scale
                 let pxY = basePos.y * scale + entry.bearing.y * fit.scale

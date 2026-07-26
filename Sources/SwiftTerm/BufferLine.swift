@@ -39,6 +39,14 @@ public final class BufferLine: CustomDebugStringConvertible {
     @inline(__always)
     private func bump() { generation &+= 1 }
 
+    /// Forces a redraw of this line without changing its content by advancing
+    /// `generation`. Renderers that cache per-line draw state keyed on
+    /// `generation` (the Metal path) treat the line as dirty on the next frame.
+    /// Used by the prediction overlay, which composites predicted cells at
+    /// display time without mutating the authoritative buffer, so the
+    /// underlying line's generation would otherwise never change.
+    func invalidateGeneration() { bump() }
+
     public init (cols: Int, fillData: CharData? = nil, isWrapped: Bool = false)
     {
         self.fillCharacter = (fillData == nil) ? CharData.Null : fillData!

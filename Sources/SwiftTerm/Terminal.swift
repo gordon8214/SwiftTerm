@@ -340,6 +340,97 @@ open class Terminal {
      */
     public private(set) var buffer: Buffer
 
+    /// A single predicted cell in the speculative-echo overlay, addressed in
+    /// viewport coordinates (row 0 == top visible row).
+    public struct PredictedCell: Equatable {
+        public let row: Int
+        public let col: Int
+        public let character: Character
+        public init(row: Int, col: Int, character: Character) {
+            self.row = row
+            self.col = col
+            self.character = character
+        }
+    }
+
+    /// Display-only overlay of speculatively-echoed cells. Composited over the
+    /// authoritative buffer by `buildAttributedString` at render time; it never
+    /// mutates buffer contents, so predictions can be dropped cleanly when the
+    /// real output arrives or diverges. Keyed by viewport (row, col).
+    struct PredictionOverlayState {
+        private(set) var rows: [Int: [Int: Character]] = [:]
+        var cursor: (col: Int, row: Int)?
+
+        var isEmpty: Bool { rows.isEmpty && cursor == nil }
+        var affectedRows: Set<Int> { Set(rows.keys) }
+
+        mutating func set(cells: [PredictedCell], cursor: (col: Int, row: Int)?) {
+            rows.removeAll(keepingCapacity: true)
+            for cell in cells {
+                rows[cell.row, default: [:]][cell.col] = cell.character
+            }
+            self.cursor = cursor
+        }
+
+        mutating func clear() {
+            rows.removeAll(keepingCapacity: true)
+            cursor = nil
+        }
+
+        func character(viewportRow: Int, col: Int) -> Character? {
+            rows[viewportRow]?[col]
+        }
+    }
+
+    /// Speculative-echo overlay state. See `PredictionOverlayState`. Mutated via
+    /// `TerminalView.setPredictionOverlay(cells:cursor:)`.
+    var predictionOverlay = PredictionOverlayState()
+
+    /// The cursor position the display should draw, in screen coordinates —
+    /// `row` is relative to `yBase`, the same basis as `buffer.y`. While a
+    /// speculative-echo overlay is installed this leads the real cursor to the
+    /// predicted position, so the caret sits after the predicted text instead of
+    /// lagging a round-trip behind it.
+    ///
+    /// `col == cols` is reachable and deliberate: like `buffer.x`, the predicted
+    /// cursor may rest one past the last column in the pending-wrap position, so
+    /// callers must bounds-check before indexing a line with it.
+    func displayCursorLocation () -> (col: Int, row: Int) {
+        let buffer = displayBuffer
+        if let predicted = predictionOverlay.cursor,
+           predicted.row >= 0, predicted.row < buffer.rows,
+           predicted.col >= 0, predicted.col <= buffer.cols {
+            return (predicted.col, predicted.row)
+        }
+        return (buffer.x, buffer.y)
+    }
+
+    /// Returns a styled `CharData` for the prediction overlay at the given
+    /// absolute buffer row / column, or `nil` when no prediction covers that
+    /// cell. The predicted glyph inherits the base cell's colors and is marked
+    /// with a single underline so speculative text reads as tentative.
+    func predictedCharData(absoluteRow: Int, col: Int, base: CharData) -> CharData? {
+        guard !predictionOverlay.rows.isEmpty else { return nil }
+        let viewportRow = absoluteRow - displayBuffer.yBase
+        guard let ch = predictionOverlay.character(viewportRow: viewportRow, col: col) else {
+            return nil
+        }
+        let baseAttr = base.attribute
+        // Keep whatever underline the base cell already carried (a curly
+        // spell-check marker, an OSC 8 hyperlink and its colour) and only add a
+        // plain underline when it had none — overwriting it would make the
+        // decoration flicker to single-and-back on every keystroke over
+        // decorated text.
+        let predictedAttr = Attribute(
+            fg: baseAttr.fg,
+            bg: baseAttr.bg,
+            style: baseAttr.style.union(.underline),
+            underlineStyle: baseAttr.style.contains(.underline) ? baseAttr.underlineStyle : .single,
+            underlineColor: baseAttr.underlineColor
+        )
+        return makeCharData(attribute: predictedAttr, char: ch)
+    }
+
     private let synchronizedOutputTimeoutSeconds: TimeInterval = 1.0
     public private(set) var synchronizedOutputActive: Bool = false
     private var synchronizedOutputTimeoutItem: DispatchWorkItem?

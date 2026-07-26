@@ -3085,7 +3085,7 @@ extension TerminalView: UIAccessibilityReadingContent {
             return NSAttributedString(string: "")
         }
 
-        let lineInfo = buildAttributedString(row: row, line: line, cols: lineLimit)
+        let lineInfo = buildAttributedString(row: row, line: line, cols: lineLimit, includePredictions: false)
         let result = NSMutableAttributedString()
         for segment in lineInfo.segments {
             result.append(segment.attributedString)
