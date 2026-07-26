@@ -2546,6 +2546,8 @@ open class Terminal {
                 buffer.linesTop = 0
                 buffer.yBase = max (buffer.yBase - scrollBackSize, 0)
                 buffer.yDisp = max (buffer.yDisp - scrollBackSize, 0)
+                updateFullScreen()
+                tdel?.scrolled(source: self, yDisp: buffer.yDisp)
             }
             break;
         default:

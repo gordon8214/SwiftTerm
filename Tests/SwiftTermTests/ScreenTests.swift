@@ -246,6 +246,9 @@ final class ScreenTests {
         TerminalTestHarness.assertLineText(terminal.buffer, row: 0, equals: "3")
         TerminalTestHarness.assertLineText(terminal.buffer, row: 1, equals: "4")
         TerminalTestHarness.assertLineText(terminal.buffer, row: 2, equals: "5")
+        #expect(terminal.buffer.lines.count == terminal.rows)
+        #expect(terminal.buffer.yBase == 0)
+        #expect(terminal.buffer.yDisp == 0)
     }
 
     /// Test EL 0 - Erase from cursor to end of line

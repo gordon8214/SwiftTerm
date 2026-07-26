@@ -111,6 +111,26 @@ final class IOSTerminalKeyboardScrollTests: XCTestCase {
         assertCaretIsVisible(in: view)
     }
 
+    func testEraseScrollbackShrinksTheScrollViewAndReturnsItToTheViewport() {
+        let view = makeView()
+        let rows = view.terminal.rows
+        view.feed(text: String(repeating: "history\r\n", count: rows * 2))
+        view.updateScroller()
+
+        XCTAssertGreaterThan(view.terminal.displayBuffer.lines.count, rows)
+        XCTAssertGreaterThan(view.contentOffset.y, 0)
+
+        view.feed(text: "\u{1b}[3J")
+
+        XCTAssertEqual(view.terminal.displayBuffer.lines.count, rows)
+        XCTAssertEqual(
+            view.contentSize.height,
+            CGFloat(rows) * view.cellDimension.height,
+            accuracy: 0.001
+        )
+        XCTAssertEqual(view.contentOffset.y, 0, accuracy: 0.001)
+    }
+
     private func assertCaretIsVisible(
         in view: TerminalView,
         file: StaticString = #filePath,
