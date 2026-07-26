@@ -143,6 +143,7 @@ extension TerminalView {
     // This is invoked when the font changes to recompute state
     func resetFont()
     {
+        resetManualScrollOffsetWithinRow()
         resetCaches()
         self.cellDimension = computeFontDimensions ()
         if (frame.width > 0) && (frame.height > 0) {
@@ -230,6 +231,7 @@ extension TerminalView {
         let newCols = Int (getEffectiveWidth (size: newSize) / cellDimension.width)
         
         if newCols != terminal.cols || newRows != terminal.rows {
+            resetManualScrollOffsetWithinRow()
             selection.active = false
             terminal.resize (cols: newCols, rows: newRows)
             
@@ -923,11 +925,31 @@ extension TerminalView {
     func invalidateLinkHighlightRow(_ bufferRow: Int)
     {
         let displayBuffer = terminal.displayBuffer
-        let screenRow = bufferRow - displayBuffer.yDisp
-        guard screenRow >= 0 && screenRow < terminal.rows else {
+        guard terminalViewportGeometry()?.visibleRows.contains(bufferRow) == true else {
             return
         }
-        terminal.updateRange(borrowing: displayBuffer, screenRow)
+        let screenRow = bufferRow - displayBuffer.yDisp
+        if screenRow >= 0 && screenRow < terminal.rows {
+            terminal.updateRange(borrowing: displayBuffer, screenRow)
+            return
+        }
+
+        // A smooth viewport can expose part of the row immediately below the
+        // integer terminal grid. It has no viewport row index that
+        // Terminal.updateRange can accept, so invalidate that absolute row
+        // directly.
+        #if canImport(MetalKit)
+        if metalView != nil {
+            markMetalDirty(bufferRow...bufferRow)
+            requestMetalDisplay()
+            return
+        }
+        #endif
+        #if os(macOS)
+        needsDisplay = true
+        #else
+        setNeedsDisplay(bounds)
+        #endif
     }
 
     func linkVisibleForClick(match: Terminal.LinkMatch, hasCommandModifier: Bool) -> Bool
@@ -1271,8 +1293,20 @@ extension TerminalView {
         let yOffset = ceil(lineDescent+lineLeading)
         let displayBuffer = terminal.displayBuffer
 
+        #if os(macOS)
+        guard let viewportGeometry = terminalViewportGeometry() else {
+            context.clear(dirtyRect)
+            return
+        }
+        let effectiveBufferOffset = viewportGeometry.firstRow
+        let viewportOffsetY = viewportGeometry.offsetFromFirstRow
+        #else
+        let effectiveBufferOffset = bufferOffset
+        let viewportOffsetY: CGFloat = 0
+        #endif
+
         func calcLineOffset (forRow: Int) -> CGFloat {
-            cellDimension.height * CGFloat (forRow-bufferOffset+1)
+            cellDimension.height * CGFloat (forRow-effectiveBufferOffset+1)
         }
         // draw lines
         #if os(iOS) || os(visionOS)
@@ -1286,11 +1320,12 @@ extension TerminalView {
         let firstRow = Int(contentOffset.y / cellHeight)
         let lastRow = firstRow + Int(ceil(bounds.height / cellHeight))
         #else
-        // On Mac, we are drawing the terminal buffer
+        // On Mac, draw every row intersecting the continuously positioned
+        // terminal grid. The per-row loop still skips rows outside dirtyRect
+        // when that optimization is enabled.
         let cellHeight = cellDimension.height
-        let boundsMaxY = bounds.maxY
-        let firstRow = displayBuffer.yDisp+Int ((boundsMaxY-dirtyRect.maxY)/cellHeight)
-        let lastRow = displayBuffer.yDisp+Int((boundsMaxY-dirtyRect.minY)/cellHeight)
+        let firstRow = viewportGeometry.firstRow
+        let lastRow = viewportGeometry.lastRow
         #endif
 
         let isAltBuffer = terminal.isCurrentBufferAlternate
@@ -1310,6 +1345,9 @@ extension TerminalView {
         // scroll region, line insert/delete) otherwise keeps stale glyphs/backgrounds.
         // Clear to transparent — not fill — so a translucent background is preserved.
         context.clear(dirtyRect)
+        context.saveGState()
+        context.clip(to: terminalViewportClipRect)
+        defer { context.restoreGState() }
         #endif
 
         for row in firstRow...lastRow {
@@ -1321,7 +1359,7 @@ extension TerminalView {
             }
             let renderMode = displayBuffer.lines [row].renderMode
             let lineOffset = calcLineOffset(forRow: row)
-            let lineOrigin = CGPoint(x: 0, y: frame.height - lineOffset)
+            let lineOrigin = CGPoint(x: 0, y: frame.height - lineOffset + viewportOffsetY)
 
             switch renderMode {
             case .single:
@@ -1806,32 +1844,31 @@ extension TerminalView {
             let newY = max (0, region.origin.y - extra)
             region = CGRect (x: 0, y: newY, width: frame.width, height: region.maxY - newY)
         }
+        if manualScrollOffsetWithinRow != 0 {
+            // Row-relative dirty rectangles do not describe a viewport whose
+            // rows are translated between cell boundaries. Redraw the viewport
+            // until it returns to a row-aligned position.
+            region = bounds
+        }
 #if canImport(MetalKit)
         if metalView != nil {
             let buffer = terminal.displayBuffer
-            if buffer.lines.count == 0 {
-                metalDirtyRange = nil
-            } else {
-                let maxRow = buffer.lines.count - 1
-                let visibleStart = buffer.yDisp
-                let visibleEnd = min(maxRow, buffer.yDisp + buffer.rows - 1)
+            if let visibleRows = terminalViewportGeometry()?.visibleRows {
                 if rowStart >= 0 && rowEnd >= rowStart && rowEnd < terminal.rows {
-                    let absStart = buffer.yDisp + rowStart
-                    let absEnd = buffer.yDisp + rowEnd
-                    let clampedStart = max(0, min(absStart, maxRow))
-                    let clampedEnd = max(0, min(absEnd, maxRow))
+                    let absoluteStart = buffer.yDisp + rowStart
+                    let absoluteEnd = buffer.yDisp + rowEnd
+                    let clampedStart = max(absoluteStart, visibleRows.lowerBound)
+                    let clampedEnd = min(absoluteEnd, visibleRows.upperBound)
                     if clampedStart <= clampedEnd {
-                        metalDirtyRange = clampedStart...clampedEnd
-                    } else if visibleStart <= visibleEnd {
-                        metalDirtyRange = visibleStart...visibleEnd
+                        markMetalDirty(clampedStart...clampedEnd)
                     } else {
-                        metalDirtyRange = nil
+                        markMetalDirty(visibleRows)
                     }
-                } else if visibleStart <= visibleEnd {
-                    metalDirtyRange = visibleStart...visibleEnd
                 } else {
-                    metalDirtyRange = nil
+                    markMetalDirty(visibleRows)
                 }
+            } else {
+                metalDirtyRange = nil
             }
             lastRenderedCursor = (x: buffer.x, y: buffer.yBase + buffer.y, hidden: terminal.cursorHidden)
             requestMetalDisplay()
@@ -1846,7 +1883,11 @@ extension TerminalView {
         // life data being fed into it.
         #if canImport(MetalKit)
         if metalView != nil {
-            metalDirtyRange = metalVisibleRange()
+            if let visibleRows = metalVisibleRange() {
+                markMetalDirty(visibleRows)
+            } else {
+                metalDirtyRange = nil
+            }
             let buffer = terminal.displayBuffer
             lastRenderedCursor = (x: buffer.x, y: buffer.yBase + buffer.y, hidden: terminal.cursorHidden)
             requestMetalDisplay()
@@ -1884,7 +1925,12 @@ extension TerminalView {
         let (cursorColumn, cursorRowViewport) = terminal.displayCursorLocation ()
         let vy = buffer.yBase + cursorRowViewport
 
-        if vy >= buffer.yDisp + buffer.rows {
+        #if os(macOS)
+        let cursorIsVisible = terminalViewportGeometry()?.visibleRows.contains(vy) == true
+        #else
+        let cursorIsVisible = vy < buffer.yDisp + buffer.rows
+        #endif
+        if !cursorIsVisible {
             caretView.removeFromSuperview()
             return
         } else if terminal.cursorHidden == false && caretView.superview != self {
@@ -1904,7 +1950,10 @@ extension TerminalView {
         let lineOrigin = CGPoint(x: 0, y: offset)
         #else
         let offset = (cellDimension.height * (CGFloat(cursorRowViewport-(buffer.yDisp-buffer.yBase)+1)))
-        let lineOrigin = CGPoint(x: 0, y: frame.height - offset)
+        let lineOrigin = CGPoint(
+            x: 0,
+            y: frame.height - offset + manualScrollOffsetWithinRow
+        )
         #endif
         let charUnderCursor = caretLine.count > 0 ? caretLine [caretColumn] : CharData.Null
         // Span the caret across the full character so a block cursor covers a
@@ -1912,6 +1961,17 @@ extension TerminalView {
         let cursorColumnWidth = max(1, Int(charUnderCursor.width))
         caretView.frame.origin = CGPoint(x: lineOrigin.x + (cellDimension.width * doublePosition * CGFloat(caretColumn)), y: lineOrigin.y)
         caretView.frame.size.width = cellDimension.width * doublePosition * CGFloat(cursorColumnWidth)
+        #if os(macOS)
+        let visibleCaretFrame = caretView.frame.intersection(terminalViewportClipRect)
+        if visibleCaretFrame.isNull || visibleCaretFrame.isEmpty {
+            caretView.viewportClipRect = .zero
+        } else {
+            caretView.viewportClipRect = visibleCaretFrame.offsetBy(
+                dx: -caretView.frame.minX,
+                dy: -caretView.frame.minY
+            )
+        }
+        #endif
         caretView.setText (ch: charUnderCursor)
     }
 
@@ -1986,6 +2046,16 @@ extension TerminalView {
     }
 
 #if canImport(MetalKit)
+    func markMetalDirty(_ range: ClosedRange<Int>) {
+        if let existingRange = metalDirtyRange {
+            let lowerBound = min(existingRange.lowerBound, range.lowerBound)
+            let upperBound = max(existingRange.upperBound, range.upperBound)
+            metalDirtyRange = lowerBound...upperBound
+        } else {
+            metalDirtyRange = range
+        }
+    }
+
     func requestMetalDisplay() {
         guard let metalView = metalView else {
             return
@@ -2067,16 +2137,22 @@ extension TerminalView {
     public var scrollPosition: Double {
         get {
             let displayBuffer = terminal.displayBuffer
-            if terminal.isDisplayBufferAlternate || displayBuffer.yDisp <= 0 {
+            #if os(macOS)
+            let rowPosition = CGFloat(displayBuffer.yDisp) +
+                manualScrollOffsetWithinRow / max(cellDimension.height, 1)
+            #else
+            let rowPosition = CGFloat(displayBuffer.yDisp)
+            #endif
+            if terminal.isDisplayBufferAlternate || rowPosition <= 0 {
                 return 0
             }
             
             let maxScrollback = displayBuffer.lines.count - displayBuffer.rows
-            if displayBuffer.yDisp >= maxScrollback {
+            if maxScrollback <= 0 || rowPosition >= CGFloat(maxScrollback) {
                 return 1
             }
             
-            return Double (displayBuffer.yDisp) / Double (maxScrollback)
+            return Double(rowPosition) / Double(maxScrollback)
         }
     }
     
@@ -2095,8 +2171,6 @@ extension TerminalView {
     public func scroll (toPosition: Double)
     {
         let displayBuffer = terminal.displayBuffer
-        let oldPosition = displayBuffer.yDisp
-        
         let maxScrollback = max(0, displayBuffer.lines.count - displayBuffer.rows)
         var newScrollPosition = Int (Double (maxScrollback) * toPosition)
         
@@ -2107,14 +2181,12 @@ extension TerminalView {
             newScrollPosition = maxScrollback
         }
 
-        if newScrollPosition != oldPosition {
-            scrollTo(row: newScrollPosition)
-        } else {
-            updateUserScrollingState(for: newScrollPosition, in: displayBuffer)
-        }
+        // Programmatic navigation is intentionally row-aligned, even if the
+        // requested row matches the integer component of a precise scroll.
+        scrollTo(row: newScrollPosition)
     }
 
-    private func updateUserScrollingState(for row: Int, in displayBuffer: Buffer) {
+    func updateUserScrollingState(for row: Int, in displayBuffer: Buffer) {
         let maxScrollback = max(0, displayBuffer.lines.count - displayBuffer.rows)
         let isUserScrolling = row < maxScrollback
         userScrolling = isUserScrolling
@@ -2126,9 +2198,7 @@ extension TerminalView {
         let displayBuffer = terminal.displayBuffer
         let maxScrollback = max(0, displayBuffer.lines.count - displayBuffer.rows)
         let targetRow = max(0, min(row, maxScrollback))
-#if os(iOS) || os(visionOS)
         resetManualScrollOffsetWithinRow()
-#endif
         updateUserScrollingState(for: targetRow, in: displayBuffer)
 
         if targetRow != displayBuffer.yDisp {
@@ -2142,15 +2212,24 @@ extension TerminalView {
             //selectionView.notifyScrolled(source: terminal)
             terminalDelegate?.scrolled (source: self, position: scrollPosition)
             updateScroller()
+            updateCursorPosition()
             setNeedsDisplay(frame)
         } else {
-#if os(iOS) || os(visionOS)
             // The row did not change, but we just cleared any sub-row manual
             // scroll offset above; resync contentOffset so a later output-driven
             // updateScroller does not snap the view up by that stale fractional
             // amount.
             updateScroller()
-#endif
+            updateCursorPosition()
+            #if canImport(MetalKit)
+            if metalView != nil {
+                requestMetalDisplay()
+            } else {
+                setNeedsDisplay(frame)
+            }
+            #else
+            setNeedsDisplay(frame)
+            #endif
         }
     }
     
@@ -2287,6 +2366,7 @@ extension TerminalView {
     public func changeScrollback (_ newScrollback: Int?)
     {
         terminal.changeScrollback(newScrollback)
+        resetManualScrollOffsetWithinRow()
         updateScroller()
         terminalDelegate?.scrolled(source: self, position: scrollPosition)
         queuePendingDisplay()

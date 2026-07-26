@@ -10,10 +10,11 @@ public enum MetalBufferingMode {
     /// for typical interactive use where only a few rows change per frame.
     case perRowPersistent
 
-    /// All visible rows are aggregated into a single buffer every frame.
-    /// This avoids per-row bookkeeping and may be preferable for workloads
-    /// that redraw most of the screen each frame (for example, full-screen
-    /// TUI applications).
+    /// All visible rows are aggregated into a small set of full-frame buffers.
+    /// Content changes rebuild the aggregate, while viewport-only frames reuse
+    /// it. This avoids per-row draw calls and may be preferable for workloads
+    /// that redraw most of the screen (for example, full-screen TUI
+    /// applications).
     case perFrameAggregated
 }
 #endif

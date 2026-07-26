@@ -52,7 +52,7 @@ builds and caches GPU buffers each frame:
 | Mode | Behavior | Best for |
 |------|----------|----------|
 | ``MetalBufferingMode/perRowPersistent`` (default) | Caches vertex data per row; only dirty rows are rebuilt each frame. | Interactive shells, editors, and typical terminal use. |
-| ``MetalBufferingMode/perFrameAggregated`` | Rebuilds all visible rows into a single buffer every frame. | Full-screen TUI apps that repaint most of the screen each frame. |
+| ``MetalBufferingMode/perFrameAggregated`` | Aggregates visible rows into full-frame buffers and reuses them for viewport-only frames. | Full-screen TUI apps that repaint most of the screen. |
 
 Change the mode at any time — the renderer picks it up on the next frame:
 

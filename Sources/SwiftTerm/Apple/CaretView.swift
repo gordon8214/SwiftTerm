@@ -16,8 +16,17 @@ extension CaretView {
         guard let terminal else {
             return
         }
+        #if os(macOS)
+        let clipBounds = viewportClipRect ?? bounds
+        #else
+        let clipBounds = bounds
+        #endif
+        guard !clipBounds.isNull, !clipBounds.isEmpty else {
+            return
+        }
         context.saveGState()
-        context.clip(to: [bounds])
+        defer { context.restoreGState() }
+        context.clip(to: [clipBounds])
         context.setFillColor(TTColor.clear.cgColor)
         context.fill ([bounds])
         
@@ -80,6 +89,5 @@ extension CaretView {
                 CTFontDrawGlyphs(runFont, runGlyphs, &positions, positions.count, context)
             }
         }
-        context.restoreGState()
     }
 }

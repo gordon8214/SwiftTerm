@@ -232,6 +232,7 @@ open class TerminalView: NSView, NSTextInputClient, NSUserInterfaceValidations, 
     /// word jumps, which would otherwise leave the cursor visually stuck
     /// because `MTKView` is paused and only redraws on demand.
     var lastRenderedCursor: (x: Int, y: Int, hidden: Bool)?
+    private var metalScreenObserver: NSObjectProtocol?
     /// Controls how the Metal renderer builds GPU buffers each frame.
     ///
     /// The default is ``MetalBufferingMode/perRowPersistent``, which caches
@@ -431,6 +432,7 @@ open class TerminalView: NSView, NSTextInputClient, NSUserInterfaceValidations, 
         mtkView.autoresizingMask = [.width, .height]
         mtkView.isPaused = true
         mtkView.enableSetNeedsDisplay = true
+        updateMetalPreferredFramesPerSecond(for: mtkView)
         mtkView.autoResizeDrawable = false
         mtkView.framebufferOnly = true
         mtkView.colorPixelFormat = .bgra8Unorm
@@ -447,6 +449,37 @@ open class TerminalView: NSView, NSTextInputClient, NSUserInterfaceValidations, 
             metalLayer.colorspace = CGColorSpace(name: CGColorSpace.sRGB)
         }
         return mtkView
+    }
+
+    private func preferredMetalFramesPerSecond() -> Int {
+        if #available(macOS 12.0, *), let screen = window?.screen {
+            return max(1, screen.maximumFramesPerSecond)
+        }
+        // A detached view (or macOS 11) has no refresh-rate API. Request the
+        // ProMotion maximum; MetalKit selects the closest supported rate for
+        // the screen that eventually hosts the view.
+        return 120
+    }
+
+    func updateMetalPreferredFramesPerSecond(for view: MTKView? = nil) {
+        (view ?? metalView)?.preferredFramesPerSecond = preferredMetalFramesPerSecond()
+    }
+
+    private func updateMetalScreenObservation() {
+        if let metalScreenObserver {
+            NotificationCenter.default.removeObserver(metalScreenObserver)
+            self.metalScreenObserver = nil
+        }
+        guard let window else {
+            return
+        }
+        metalScreenObserver = NotificationCenter.default.addObserver(
+            forName: NSWindow.didChangeScreenNotification,
+            object: window,
+            queue: .main
+        ) { [weak self] _ in
+            self?.updateMetalPreferredFramesPerSecond()
+        }
     }
 
     /// Inserts the Metal view into the view hierarchy with the correct
@@ -551,9 +584,12 @@ open class TerminalView: NSView, NSTextInputClient, NSUserInterfaceValidations, 
         super.viewDidMoveToWindow()
         startWindowMouseMovedFallback()
 #if canImport(MetalKit)
+        updateMetalScreenObservation()
         guard useMetalRenderer, let currentWindow = window else { return }
         if currentWindow !== metalBoundWindow {
             rebindMetalRendererToWindow(currentWindow)
+        } else {
+            updateMetalPreferredFramesPerSecond()
         }
 #endif
     }
@@ -572,6 +608,11 @@ open class TerminalView: NSView, NSTextInputClient, NSUserInterfaceValidations, 
     
     deinit {
         stopWindowMouseMovedFallback()
+#if canImport(MetalKit)
+        if let metalScreenObserver {
+            NotificationCenter.default.removeObserver(metalScreenObserver)
+        }
+#endif
         if let becomeMainObserver {
             NotificationCenter.default.removeObserver (becomeMainObserver)
         }
@@ -769,7 +810,7 @@ open class TerminalView: NSView, NSTextInputClient, NSUserInterfaceValidations, 
             pageDown()
             scroller.doubleValue =  scrollPosition
         case .knob:
-            scroll(toPosition: scroller.doubleValue)
+            scrollNormalBuffer(toPosition: scroller.doubleValue)
         case .knobSlot:
             print ("Scroller .knobSlot clicked")
         case .noPart:
@@ -839,6 +880,7 @@ open class TerminalView: NSView, NSTextInputClient, NSUserInterfaceValidations, 
     }
     
     open func bufferActivated(source: Terminal) {
+        resetManualScrollOffsetWithinRow()
         updateScroller ()
     }
     
@@ -868,6 +910,9 @@ open class TerminalView: NSView, NSTextInputClient, NSUserInterfaceValidations, 
     }
     
     open func scrolled(source terminal: Terminal, yDisp: Int) {
+        if !terminal.userScrolling {
+            resetManualScrollOffsetWithinRow()
+        }
         //selectionView.notifyScrolled(source: terminal)
         updateScroller()
         terminalDelegate?.scrolled(source: self, position: scrollPosition)
@@ -919,6 +964,43 @@ open class TerminalView: NSView, NSTextInputClient, NSUserInterfaceValidations, 
     }
     
     var userScrolling = false
+    private(set) var manualScrollOffsetWithinRow: CGFloat = 0
+
+    func resetManualScrollOffsetWithinRow() {
+        manualScrollOffsetWithinRow = 0
+    }
+
+    func terminalViewportGeometry() -> TerminalViewportGeometry? {
+        guard let cellHeight = cellDimension?.height, cellHeight > 0 else {
+            return nil
+        }
+        let displayBuffer = terminal.displayBuffer
+        let scrollOffsetY = CGFloat(displayBuffer.yDisp) * cellHeight + manualScrollOffsetWithinRow
+        let gridHeight = CGFloat(displayBuffer.rows) * cellHeight
+        return TerminalViewportGeometry.make(
+            lineCount: displayBuffer.lines.count,
+            cellHeight: cellHeight,
+            viewportHeight: gridHeight,
+            scrollOffsetY: scrollOffsetY
+        )
+    }
+
+    var terminalViewportBottomMarginHeight: CGFloat {
+        guard let cellHeight = cellDimension?.height else {
+            return 0
+        }
+        return max(0, bounds.height - CGFloat(terminal.rows) * cellHeight)
+    }
+
+    var terminalViewportClipRect: CGRect {
+        let bottomMargin = terminalViewportBottomMarginHeight
+        return CGRect(
+            x: bounds.minX,
+            y: bounds.minY + bottomMargin,
+            width: bounds.width,
+            height: max(0, bounds.height - bottomMargin)
+        )
+    }
 
     override open func viewWillDraw() {
         
@@ -2314,17 +2396,10 @@ open class TerminalView: NSView, NSTextInputClient, NSUserInterfaceValidations, 
     open func selectionChanged(source: Terminal) {
         #if canImport(MetalKit)
         if metalView != nil {
-            let buffer = terminal.displayBuffer
-            if buffer.lines.count == 0 {
-                metalDirtyRange = nil
+            if let visibleRows = terminalViewportGeometry()?.visibleRows {
+                markMetalDirty(visibleRows)
             } else {
-                let startRow = buffer.yDisp
-                let endRow = min(buffer.lines.count - 1, buffer.yDisp + buffer.rows - 1)
-                if startRow <= endRow {
-                    metalDirtyRange = startRow...endRow
-                } else {
-                    metalDirtyRange = nil
-                }
+                metalDirtyRange = nil
             }
             queueMetalDisplay()
             return
@@ -2390,11 +2465,16 @@ open class TerminalView: NSView, NSTextInputClient, NSUserInterfaceValidations, 
         }
         let displayBuffer = terminal.displayBuffer
         let col = Int (point.x / cellDimension.width)
-        let row = Int ((frame.height-point.y) / cellDimension.height)
+        let row = Int(
+            floor((frame.height - point.y + manualScrollOffsetWithinRow) / cellDimension.height)
+        )
         let colValue = min (max (0, col), terminal.cols-1)
         let bufferRow = row + displayBuffer.yDisp
         let maxRow = max (0, displayBuffer.lines.count - 1)
-        let rowValue = min (max (0, bufferRow), maxRow)
+        let visibleRows = terminalViewportGeometry()?.visibleRows
+        let firstVisibleRow = visibleRows?.lowerBound ?? 0
+        let lastVisibleRow = visibleRows?.upperBound ?? maxRow
+        let rowValue = min(max(firstVisibleRow, bufferRow), min(lastVisibleRow, maxRow))
         return (Position(col: colValue, row: rowValue), toInt (point))
     }
     
@@ -2721,6 +2801,66 @@ open class TerminalView: NSView, NSTextInputClient, NSUserInterfaceValidations, 
         didSet { scrollSensitivity = max(0.05, scrollSensitivity) }
     }
 
+    @discardableResult
+    func setNormalBufferScrollPosition(_ requestedOffsetY: CGFloat) -> Bool {
+        guard let cellHeight = cellDimension?.height, cellHeight > 0 else {
+            return false
+        }
+        let displayBuffer = terminal.displayBuffer
+        let maxRow = max(0, displayBuffer.lines.count - displayBuffer.rows)
+        let maxOffsetY = CGFloat(maxRow) * cellHeight
+        let currentOffsetY = CGFloat(displayBuffer.yDisp) * cellHeight + manualScrollOffsetWithinRow
+        let targetOffsetY = min(max(0, requestedOffsetY), maxOffsetY)
+        guard targetOffsetY != currentOffsetY else {
+            return false
+        }
+
+        let targetRow = min(maxRow, max(0, Int(floor(targetOffsetY / cellHeight))))
+        let offsetWithinRow = targetOffsetY - CGFloat(targetRow) * cellHeight
+        manualScrollOffsetWithinRow = targetRow == maxRow ? 0 : offsetWithinRow
+        updateUserScrollingState(for: targetRow, in: displayBuffer)
+        if targetRow != displayBuffer.yDisp {
+            terminal.setViewYDisp(targetRow)
+        }
+
+        updateScroller()
+        updateCursorPosition()
+        terminalDelegate?.scrolled(source: self, position: scrollPosition)
+        accessibility.invalidate()
+        NSAccessibility.post(element: self, notification: .valueChanged)
+
+        #if canImport(MetalKit)
+        if metalView != nil {
+            requestMetalDisplay()
+        } else {
+            needsDisplay = true
+        }
+        #else
+        needsDisplay = true
+        #endif
+        return true
+    }
+
+    @discardableResult
+    func scrollNormalBuffer(byPreciseDelta deltaY: CGFloat) -> Bool {
+        guard let cellHeight = cellDimension?.height else {
+            return false
+        }
+        let displayBuffer = terminal.displayBuffer
+        let currentOffsetY = CGFloat(displayBuffer.yDisp) * cellHeight + manualScrollOffsetWithinRow
+        return setNormalBufferScrollPosition(currentOffsetY - deltaY)
+    }
+
+    func scrollNormalBuffer(toPosition position: Double) {
+        guard let cellHeight = cellDimension?.height else {
+            return
+        }
+        let displayBuffer = terminal.displayBuffer
+        let maxRow = max(0, displayBuffer.lines.count - displayBuffer.rows)
+        let targetOffsetY = CGFloat(maxRow) * cellHeight * CGFloat(min(max(position, 0), 1))
+        _ = setNormalBufferScrollPosition(targetOffsetY)
+    }
+
     public override func scrollWheel(with event: NSEvent) {
         // Preserves the previous `deltaY == 0` early exit, restated against the
         // delta this method now reads. Without it a zero delta would fall into
@@ -2732,14 +2872,25 @@ open class TerminalView: NSView, NSTextInputClient, NSUserInterfaceValidations, 
             return
         }
 
-        // Translate the wheel/trackpad delta into a whole number of terminal
-        // lines while preserving a 1:1 feel. Precise (trackpad) deltas are pixel
-        // values we accumulate and divide by the cell height, keeping the
-        // remainder for the next event; classic mouse-wheel deltas already come
-        // in line units. This replaces the old step-function velocity that
-        // jumped a full page on fast flicks — the cause of the visible line
-        // "skipping" during fast scrolls. `scrollSensitivity` scales the delta.
+        let reportsMouse = allowMouseReporting &&
+            !shiftBypassesMouseReporting(for: event) &&
+            terminal.mouseMode != .off
+        let usesAlternateBuffer = terminal.isDisplayBufferAlternate
         let scaledDelta = event.scrollingDeltaY * scrollSensitivity
+
+        // Normal-buffer trackpad and Magic Mouse events carry point deltas.
+        // Keep those points as a visual sub-row offset instead of waiting for
+        // enough events to cross a whole terminal cell. Momentum events follow
+        // this same path, so AppKit controls the native deceleration curve.
+        if event.hasPreciseScrollingDeltas && !reportsMouse && !usesAlternateBuffer {
+            scrollAccumulator = 0
+            _ = scrollNormalBuffer(byPreciseDelta: scaledDelta)
+            return
+        }
+
+        // Translate the wheel/trackpad delta into a whole number of terminal
+        // lines only when the gesture must become terminal protocol events or
+        // when a classic mouse wheel already reports line units.
         let lines: Int
         if event.hasPreciseScrollingDeltas {
             scrollAccumulator += scaledDelta
@@ -2758,7 +2909,7 @@ open class TerminalView: NSView, NSTextInputClient, NSUserInterfaceValidations, 
         let scrollingUp = lines > 0
         let magnitude = abs(lines)
 
-        if allowMouseReporting && !shiftBypassesMouseReporting(for: event) && terminal.mouseMode != .off {
+        if reportsMouse {
             let hit = calculateMouseHit(with: event)
             let displayBuffer = terminal.displayBuffer
             let screenRow = max (0, min (displayBuffer.rows - 1, hit.grid.row - displayBuffer.yDisp))
@@ -2768,7 +2919,7 @@ open class TerminalView: NSView, NSTextInputClient, NSUserInterfaceValidations, 
             for _ in 0..<magnitude {
                 terminal.sendEvent(buttonFlags: buttonFlags, x: hit.grid.col, y: screenRow, pixelX: hit.pixels.col, pixelY: hit.pixels.row)
             }
-        } else if terminal.isDisplayBufferAlternate {
+        } else if usesAlternateBuffer {
             for _ in 0..<magnitude {
                 if scrollingUp {
                     sendKeyUp()

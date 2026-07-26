@@ -395,6 +395,7 @@ open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollVi
             mtkView.autoresizingMask = [.flexibleWidth, .flexibleHeight]
             mtkView.isPaused = true
             mtkView.enableSetNeedsDisplay = true
+            mtkView.preferredFramesPerSecond = preferredMetalFramesPerSecond()
             mtkView.framebufferOnly = true
             mtkView.colorPixelFormat = .bgra8Unorm
             mtkView.isUserInteractionEnabled = false
@@ -430,7 +431,30 @@ open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollVi
             setNeedsDisplay(bounds)
         }
     }
+
+    private func preferredMetalFramesPerSecond() -> Int {
+        #if os(iOS)
+        if let screen = window?.windowScene?.screen {
+            return max(1, screen.maximumFramesPerSecond)
+        }
+        #endif
+        // A detached view has no screen context yet. Request ProMotion's
+        // maximum and let MetalKit select the closest rate supported by the
+        // screen once the view joins a window.
+        return 120
+    }
+
+    private func updateMetalPreferredFramesPerSecond() {
+        metalView?.preferredFramesPerSecond = preferredMetalFramesPerSecond()
+    }
 #endif
+
+    open override func didMoveToWindow() {
+        super.didMoveToWindow()
+        #if canImport(MetalKit)
+        updateMetalPreferredFramesPerSecond()
+        #endif
+    }
 
     func setupDisplayUpdates ()
     {
@@ -1532,22 +1556,23 @@ open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollVi
 
 #if canImport(MetalKit)
     func metalVisibleRange() -> ClosedRange<Int>? {
-        let buffer = terminal.displayBuffer
-        guard buffer.lines.count > 0, cellDimension.height > 0, bounds.height > 0 else {
-            return nil
-        }
-        let contentHeight = CGFloat(buffer.lines.count) * cellDimension.height
-        let maxOffset = max(0, contentHeight - bounds.height)
-        let offsetY = min(max(0, contentOffset.y), maxOffset)
-        let firstRow = max(0, Int(floor(offsetY / cellDimension.height)))
-        let lastRow = min(buffer.lines.count - 1,
-                          Int(floor((offsetY + bounds.height - 1) / cellDimension.height)))
-        if firstRow > lastRow {
-            return nil
-        }
-        return firstRow...lastRow
+        terminalViewportGeometry()?.visibleRows
     }
 #endif
+
+    func terminalViewportGeometry() -> TerminalViewportGeometry? {
+        let displayBuffer = terminal.displayBuffer
+        return TerminalViewportGeometry.make(
+            lineCount: displayBuffer.lines.count,
+            cellHeight: cellDimension.height,
+            viewportHeight: bounds.height,
+            scrollOffsetY: contentOffset.y
+        )
+    }
+
+    var terminalViewportBottomMarginHeight: CGFloat {
+        0
+    }
     
     var userScrolling = false
     private var updatingContentOffsetFromTerminal = false
@@ -1629,17 +1654,13 @@ open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollVi
             return
         }
 
-        // Freeze auto-follow only while the finger is physically down
-        // (isTracking). Excluding the momentum coast is essential: after the
-        // finger lifts, deceleration keeps firing sync while streaming output
-        // extends the content and the bottom recedes ahead of the coasting
-        // offset — treating that "not at the bottom yet" reading as a manual
-        // scroll would re-freeze a view the user just flung to the bottom. This
-        // must key off isTracking, not isDragging: on device isDragging stays
-        // true through the entire coast, so it fails to exclude momentum. It also
-        // covers layout/system-driven offset changes (startup sizing, rotation,
-        // keyboard insets, buffer shrink), which are never a manual scroll.
-        guard isTracking else {
+        // Continue tracking native momentum only while history is already
+        // frozen. Once a fling reaches the bottom, setManualScrolling(false)
+        // above prevents later deceleration events from re-freezing follow mode
+        // if streaming output moves the bottom again. Layout/system-driven
+        // offsets likewise remain ignored unless the finger initiated the
+        // manual scroll.
+        guard isTracking || userScrolling else {
             return
         }
 
@@ -1648,7 +1669,9 @@ open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollVi
         if displayBuffer.yDisp != row {
             terminal.setViewYDisp(row)
         }
-        setManualScrolling(true)
+        if isTracking {
+            setManualScrolling(true)
+        }
     }
 
     func getCurrentGraphicsContext () -> CGContext?
@@ -2959,7 +2982,11 @@ open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollVi
  
 #if canImport(MetalKit)
             if self.metalView != nil {
-                self.metalDirtyRange = self.metalVisibleRange()
+                if let visibleRows = self.metalVisibleRange() {
+                    self.markMetalDirty(visibleRows)
+                } else {
+                    self.metalDirtyRange = nil
+                }
                 self.queueMetalDisplay()
             } else {
                 self.setNeedsDisplay(self.bounds)

@@ -23,6 +23,13 @@ class CaretView: NSView, CALayerDelegate {
     var glyphColumnWidth: Int = 1
     var bgColor: CGColor
     var tracksFocus = true
+    var viewportClipRect: CGRect? {
+        didSet {
+            if oldValue != viewportClipRect {
+                setNeedsDisplay(bounds)
+            }
+        }
+    }
     
     public init (frame: CGRect, cursorStyle: CursorStyle, terminal: TerminalView)
     {
