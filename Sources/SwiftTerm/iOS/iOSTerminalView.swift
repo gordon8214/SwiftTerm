@@ -1510,10 +1510,21 @@ open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollVi
             return
         }
         let rowOffset = CGFloat (displayBuffer.yDisp) * cellDimension.height
-        let desiredY = userScrolling ? rowOffset + manualScrollOffsetWithinRow : rowOffset
-        // Clamp to the scroll view's real maximum so following the bottom rests
-        // flush against the last line instead of over-scrolling past it.
-        let offsetY = min(desiredY, maxContentOffsetY())
+        let offsetY: CGFloat
+        if userScrolling {
+            // Frozen in history: yDisp names the top row, so derive from it and
+            // clamp to the scroll view's real maximum so we never over-scroll
+            // past the last line.
+            offsetY = min (rowOffset + manualScrollOffsetWithinRow, maxContentOffsetY ())
+        } else {
+            // Following the tail: rest flush against the bottom of the
+            // *unobscured* region. maxContentOffsetY() already folds in
+            // adjustedContentInset.bottom, so this is the offset that leaves the
+            // last line just above a software keyboard / safe area, whereas
+            // yDisp * cellHeight undershoots it by exactly that inset and parks
+            // the final rows — including the caret — behind the keyboard.
+            offsetY = maxContentOffsetY ()
+        }
         setContentOffsetFromTerminal(CGPoint (x: 0, y: offsetY))
         //Xscroller.doubleValue = scrollPosition
         //Xscroller.knobProportion = scrollThumbsize
@@ -2425,19 +2436,40 @@ open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollVi
         koreanResyllabificationTransaction.begin(deletedText: String(deletedText))
     }
 
-    func ensureCaretIsVisible ()
+    /// Brings the caret back into view when output or input has moved it out of
+    /// the row viewport, or when a host-applied bottom `contentInset` is
+    /// covering it.
+    ///
+    /// Public so hosts that drive `contentInset` themselves — to keep the caret
+    /// above a software keyboard that overlaps a fixed-size grid — can recheck
+    /// as soon as the inset changes instead of waiting for the next output
+    /// event.
+    public func ensureCaretIsVisible ()
     {
         guard !terminal.synchronizedOutputActive else { return }
+        // The gesture owns contentOffset while the finger is down, and frozen
+        // history owns it while momentum coasts. updateScroller() bails on both,
+        // but resetManualScrollTracking() below does not — it rewrites yDisp and
+        // contentOffset unconditionally — so the check has to happen up here or a
+        // keystroke / inset change / reset batch would yank the viewport out from
+        // under an active drag.
+        if isTracking || (userScrolling && isDecelerating) { return }
+
         let displayBuffer = terminal.displayBuffer
         let realCaret = displayBuffer.y + displayBuffer.yBase
         let viewportEnd = displayBuffer.yDisp + displayBuffer.rows
 
         if userScrolling || terminal.userScrolling || realCaret >= viewportEnd || realCaret < displayBuffer.yDisp {
             resetManualScrollTracking()
-            updateScroller()
         }
+        // Always re-run the pin, even when already following with the caret in
+        // the row viewport: the caller may have just changed contentInset (a
+        // software keyboard opening over an idle full-screen TUI), and only
+        // updateScroller() knows where the unobscured bottom now sits.
+        updateScroller()
     }
-    
+
+
     open func deleteBackward() {
         uitiLog("deleteBackward() \(textInputStateDescription())")
 
