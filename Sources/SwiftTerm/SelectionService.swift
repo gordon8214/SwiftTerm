@@ -81,6 +81,13 @@ class SelectionService: CustomDebugStringConvertible {
     var wordSelectionAnchor: (start: Position, end: Position)?
 
     /**
+     * The one-cell range that seeded a character-precise long-press drag.
+     * Keeping both edges ensures dragging backwards still includes the
+     * character where the gesture began.
+     */
+    var characterSelectionAnchor: (start: Position, end: Position)?
+
+    /**
      * Returns the selection ending point in buffer coordinates
      */
     public private(set) var end: Position {
@@ -102,13 +109,71 @@ class SelectionService: CustomDebugStringConvertible {
         setSoftStart(row: row, col: col)
         selectionMode = .character
         wordSelectionAnchor = nil
+        characterSelectionAnchor = nil
         setActiveAndNotify()
     }
-        
+
     func clamp (_ buffer: Buffer, _ p: Position) -> Position {
         let maxRow = max(0, buffer.lines.count - 1)
         return Position(col: min(p.col, buffer.cols - 1), row: min(p.row, maxRow))
     }
+
+    private func clampCell(_ position: Position, in buffer: Buffer) -> Position {
+        let maxColumn = max(0, buffer.cols - 1)
+        let maxRow = max(0, buffer.lines.count - 1)
+        return Position(
+            col: min(max(position.col, 0), maxColumn),
+            row: min(max(position.row, 0), maxRow)
+        )
+    }
+
+    private func positionAfterCell(_ position: Position, in buffer: Buffer) -> Position {
+        Position(col: min(position.col + 1, buffer.cols), row: position.row)
+    }
+
+    /**
+     * Selects exactly one terminal cell and records it as the fixed anchor for
+     * a character-precise drag.
+     */
+    func selectCharacter(at uncheckedPosition: Position) {
+        let buffer = terminal.displayBuffer
+        let anchor = clampCell(uncheckedPosition, in: buffer)
+        let anchorEnd = positionAfterCell(anchor, in: buffer)
+
+        start = anchor
+        end = anchorEnd
+        selectingRows = false
+        selectionMode = .character
+        wordSelectionAnchor = nil
+        characterSelectionAnchor = (anchor, anchorEnd)
+        setActiveAndNotify()
+    }
+
+    /**
+     * Extends a character selection from its original one-cell anchor,
+     * including both the anchor cell and the cell currently under the drag.
+     */
+    func extendCharacterSelection(to uncheckedPosition: Position) {
+        guard let anchor = characterSelectionAnchor else {
+            return
+        }
+
+        let buffer = terminal.displayBuffer
+        let position = clampCell(uncheckedPosition, in: buffer)
+        if Position.compare(position, anchor.start) == .before {
+            start = position
+            end = anchor.end
+        } else {
+            start = anchor.start
+            end = positionAfterCell(position, in: buffer)
+        }
+        setActiveAndNotify()
+    }
+
+    func finishCharacterSelection() {
+        characterSelectionAnchor = nil
+    }
+
     /**
      * Sets the selection, this is validated against the
      */
@@ -119,7 +184,11 @@ class SelectionService: CustomDebugStringConvertible {
         
         self.start = sclamped
         self.end = eclamped
-        
+
+        selectingRows = false
+        selectionMode = .character
+        wordSelectionAnchor = nil
+        characterSelectionAnchor = nil
         setActiveAndNotify()
     }
     
@@ -132,6 +201,7 @@ class SelectionService: CustomDebugStringConvertible {
         selectingRows = false
         selectionMode = .character
         wordSelectionAnchor = nil
+        characterSelectionAnchor = nil
         setActiveAndNotify()
     }
     
@@ -158,6 +228,7 @@ class SelectionService: CustomDebugStringConvertible {
     public func setSoftStart (bufferPosition: Position) {
         start = bufferPosition
         end = bufferPosition
+        characterSelectionAnchor = nil
         setActiveAndNotify()
     }
     
@@ -321,6 +392,10 @@ class SelectionService: CustomDebugStringConvertible {
     {
         start = Position(col: 0, row: 0)
         end = Position(col: terminal.cols-1, row: terminal.displayBuffer.lines.maxLength - 1)
+        selectingRows = false
+        selectionMode = .character
+        wordSelectionAnchor = nil
+        characterSelectionAnchor = nil
         setActiveAndNotify()
     }
     
@@ -345,6 +420,7 @@ class SelectionService: CustomDebugStringConvertible {
         selectingRows = true
         selectionMode = .row
         wordSelectionAnchor = nil
+        characterSelectionAnchor = nil
         setActiveAndNotify()
     }
 
@@ -553,6 +629,7 @@ class SelectionService: CustomDebugStringConvertible {
         }
         selectionMode = .word
         wordSelectionAnchor = (start, end)
+        characterSelectionAnchor = nil
         setActiveAndNotify()
     }
 
@@ -561,10 +638,12 @@ class SelectionService: CustomDebugStringConvertible {
      */
     public func selectNone ()
     {
+        selectingRows = false
+        selectionMode = .character
+        wordSelectionAnchor = nil
+        characterSelectionAnchor = nil
         if active {
             active = false
-            selectionMode = .character
-            wordSelectionAnchor = nil
         }
     }
     

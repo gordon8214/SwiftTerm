@@ -63,6 +63,63 @@ final class SelectionTests: TerminalDelegate {
         #expect(selection.getSelectedText() == "(abc)")
     }
 
+    @Test func testCharacterSelectionSeedsExactlyOneCell() {
+        let terminal = Terminal(delegate: self, options: TerminalOptions(cols: 5, rows: 1))
+        let selection = SelectionService(terminal: terminal)
+        terminal.feed(text: "ABCDE")
+
+        selection.selectCharacter(at: Position(col: 2, row: 0))
+
+        #expect(selection.active)
+        #expect(selection.start == Position(col: 2, row: 0))
+        #expect(selection.end == Position(col: 3, row: 0))
+        #expect(selection.getSelectedText() == "C")
+    }
+
+    @Test func testCharacterSelectionCanIncludeFinalColumn() {
+        let terminal = Terminal(delegate: self, options: TerminalOptions(cols: 5, rows: 1))
+        let selection = SelectionService(terminal: terminal)
+        terminal.feed(text: "ABCDE")
+
+        selection.selectCharacter(at: Position(col: 4, row: 0))
+
+        #expect(selection.start == Position(col: 4, row: 0))
+        #expect(selection.end == Position(col: 5, row: 0))
+        #expect(selection.getSelectedText() == "E")
+    }
+
+    @Test func testCharacterSelectionExtendsForwardAndBackwardFromSeedCell() {
+        let terminal = Terminal(delegate: self, options: TerminalOptions(cols: 10, rows: 1))
+        let selection = SelectionService(terminal: terminal)
+        terminal.feed(text: "ABCDEFGHIJ")
+
+        selection.selectCharacter(at: Position(col: 4, row: 0))
+        selection.extendCharacterSelection(to: Position(col: 7, row: 0))
+        #expect(selection.start == Position(col: 4, row: 0))
+        #expect(selection.end == Position(col: 8, row: 0))
+        #expect(selection.getSelectedText() == "EFGH")
+
+        selection.extendCharacterSelection(to: Position(col: 1, row: 0))
+        #expect(selection.start == Position(col: 1, row: 0))
+        #expect(selection.end == Position(col: 5, row: 0))
+        #expect(selection.getSelectedText() == "BCDE")
+    }
+
+    @Test func testCharacterSelectionExtendsAcrossLinesAndFinishesDrag() {
+        let terminal = Terminal(delegate: self, options: TerminalOptions(cols: 5, rows: 2))
+        let selection = SelectionService(terminal: terminal)
+        terminal.feed(text: "ABCDE\r\nFGHIJ")
+
+        selection.selectCharacter(at: Position(col: 1, row: 1))
+        selection.extendCharacterSelection(to: Position(col: 3, row: 0))
+        selection.finishCharacterSelection()
+
+        #expect(selection.start == Position(col: 3, row: 0))
+        #expect(selection.end == Position(col: 2, row: 1))
+        #expect(selection.characterSelectionAnchor == nil)
+        #expect(selection.active)
+    }
+
 #if os(macOS)
     // Test only on macOS due to differences in how frames are handled on mac and iOS
     @Test func testMouseHitCorrectWhenScrolled() {

@@ -111,7 +111,7 @@ let targets: [Target] = [
 let package = Package(
     name: "SwiftTerm",
     platforms: [
-        .iOS(.v14),
+        .iOS(.v16),
         (disableBenchmark ? .macOS(.v11) : .macOS(.v13)),
         .tvOS(.v13),
         .visionOS(.v1)
