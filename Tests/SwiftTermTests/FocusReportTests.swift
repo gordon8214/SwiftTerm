@@ -46,6 +46,33 @@ final class FocusReportTests: TerminalDelegate {
         #expect(sentString == "\u{1b}[O", "enable while unfocused reports focus-out immediately")
     }
 
+    /// Host views drive `setTerminalFocus` from `becomeFirstResponder` /
+    /// `resignFirstResponder`, and `UIResponder`/`NSResponder` answer `true`
+    /// to those even when nothing changes — resigning while not the first
+    /// responder, becoming while already the first responder. Reporting
+    /// unconditionally turned that ordinary responder traffic into a stream
+    /// of alternating CSI I / CSI O writes, each one a round trip to the host
+    /// and a full repaint in any application tracking focus.
+    @Test func repeatedFocusStateReportsOnlyOnChange() {
+        let terminal = makeTerminal()
+        terminal.feed(text: "\u{1b}[?1004h")
+        sent.removeAll()
+
+        terminal.setTerminalFocus(true)
+        #expect(sent.isEmpty, "already focused — no transition to report")
+
+        terminal.setTerminalFocus(false)
+        #expect(sentString == "\u{1b}[O")
+
+        sent.removeAll()
+        terminal.setTerminalFocus(false)
+        terminal.setTerminalFocus(false)
+        #expect(sent.isEmpty, "already unfocused — no transition to report")
+
+        terminal.setTerminalFocus(true)
+        #expect(sentString == "\u{1b}[I")
+    }
+
     @Test func focusChangesAreSilentWhenReportingDisabled() {
         let terminal = makeTerminal()
         terminal.setTerminalFocus(false)

@@ -666,7 +666,17 @@ open class Terminal {
     var reportedFocusState: Bool = true
 
     /// Invoke this command when the terminal receives and loses focus
+    ///
+    /// Edge-triggered: a call that does not change the focus state emits
+    /// nothing. Host views drive this from `becomeFirstResponder` /
+    /// `resignFirstResponder`, and `UIResponder`/`NSResponder` return `true`
+    /// from those even when they are no-ops (resigning while not the first
+    /// responder, becoming while already the first responder). Reporting
+    /// unconditionally turned that ordinary responder traffic into a stream
+    /// of alternating CSI I / CSI O reports, each one a write to the host and
+    /// a full repaint in any application that tracks focus.
     public func setTerminalFocus(_ focused: Bool) {
+        guard reportedFocusState != focused else { return }
         reportedFocusState = focused
         if sendFocus {
             sendFocusReport()
