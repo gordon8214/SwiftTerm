@@ -328,7 +328,13 @@ extension TerminalView {
         return GlyphSlotFit(dx: dx, dy: dy, scale: scale)
     }
 
-    func mapColor (color: Attribute.Color, isFg: Bool, isBold: Bool, useBrightColors: Bool = true) -> TTColor
+    func mapColor (
+        color: Attribute.Color,
+        isFg: Bool,
+        isBold: Bool,
+        useBrightColors: Bool = true,
+        boldUsesBrightColors: Bool = true
+    ) -> TTColor
     {
         switch color {
         case .defaultColor:
@@ -345,10 +351,12 @@ extension TerminalView {
             }
         case .ansi256(let ansi):
             var midx: Int
-            // if high - bright colors are enabled we will represent bold text by using more intense colors
-            // otherwise we will reduce colors but use bold fonts
+            // Preserve explicit bright indices when bright colors are enabled and
+            // optionally promote bold base colors. Otherwise, reduce bright colors
+            // to their base variants and rely on the bold font.
             if useBrightColors {
-                midx = ansi < 7 ? (Int (ansi) + (isBold ? 8 : 0)) : Int (ansi)
+                let promotesBoldColor = isBold && boldUsesBrightColors
+                midx = ansi < 7 ? (Int (ansi) + (promotesBoldColor ? 8 : 0)) : Int (ansi)
             } else {
                 midx = ansi > 7 ? (Int (ansi) - 8) : Int(ansi)
             }
@@ -501,7 +509,13 @@ extension TerminalView {
         ]
         if flags.contains (.underline) {
             let underlineColor = attribute.underlineColor.map {
-                mapColor(color: $0, isFg: true, isBold: flags.contains(.bold), useBrightColors: useBrightColors)
+                mapColor(
+                    color: $0,
+                    isFg: true,
+                    isBold: flags.contains(.bold),
+                    useBrightColors: useBrightColors,
+                    boldUsesBrightColors: boldUsesBrightColors
+                )
             } ?? fg
             let underlineVariant = attribute.underlineStyle == .none ? .single : attribute.underlineStyle
             nsattr [.underlineColor] = underlineColor
@@ -559,7 +573,13 @@ extension TerminalView {
             tf = fontSet.normal
         }
         
-        var fgColor = mapColor (color: fg, isFg: true, isBold: isBold, useBrightColors: useBrightColors)
+        var fgColor = mapColor(
+            color: fg,
+            isFg: true,
+            isBold: isBold,
+            useBrightColors: useBrightColors,
+            boldUsesBrightColors: boldUsesBrightColors
+        )
         let bgColor = mapColor (color: bg, isFg: false, isBold: false)
         // Apply dim/faint attribute (SGR 2)
         if flags.contains (.dim) {
@@ -572,7 +592,13 @@ extension TerminalView {
         ]
         if flags.contains (.underline) {
             let underlineColor = attribute.underlineColor.map {
-                mapColor(color: $0, isFg: true, isBold: isBold, useBrightColors: useBrightColors)
+                mapColor(
+                    color: $0,
+                    isFg: true,
+                    isBold: isBold,
+                    useBrightColors: useBrightColors,
+                    boldUsesBrightColors: boldUsesBrightColors
+                )
             } ?? fgColor
             let underlineVariant = attribute.underlineStyle == .none ? .single : attribute.underlineStyle
             nsattr [.underlineColor] = underlineColor

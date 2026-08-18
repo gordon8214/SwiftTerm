@@ -211,6 +211,9 @@ terminalView.antiAliasCustomBlockGlyphs = true
 
 // Use bright colors for bold text (traditional terminal behavior)
 terminalView.useBrightColors = true
+
+// Keep explicit bright colors, but render bold text without changing its color
+terminalView.boldUsesBrightColors = false
 ```
 
 ### GPU-Accelerated Rendering

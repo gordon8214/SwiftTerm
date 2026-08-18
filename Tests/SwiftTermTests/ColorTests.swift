@@ -6,6 +6,7 @@
 //
 //
 #if os(macOS)
+import AppKit
 import Foundation
 import Testing
 
@@ -235,6 +236,41 @@ final class ColorTests {
 
         #expect(lightThemeGray != darkThemeGray)
         #expect(luminance(terminal.ansiColors[232]) <= luminance(terminal.ansiColors[255]))
+    }
+
+    @Test func testBoldBaseColorUsesBrightVariantByDefault() {
+        let view = TerminalView(frame: CGRect(x: 0, y: 0, width: 320, height: 160))
+        view.installColors(Color.xtermColors)
+        view.terminal.feed(text: "\u{001B}[1;31mA\u{001B}[0;91mB")
+
+        let boldBaseColor = renderedForeground(in: view, column: 0)
+        let explicitBrightColor = renderedForeground(in: view, column: 1)
+
+        #expect(view.boldUsesBrightColors)
+        #expect(boldBaseColor?.isEqual(explicitBrightColor) == true)
+    }
+
+    @Test func testBoldBaseColorCanRemainDistinctFromExplicitBrightColor() {
+        let view = TerminalView(frame: CGRect(x: 0, y: 0, width: 320, height: 160))
+        view.installColors(Color.xtermColors)
+        view.boldUsesBrightColors = false
+        view.terminal.feed(text: "\u{001B}[1;31mA\u{001B}[0;91mB")
+
+        let boldBaseColor = renderedForeground(in: view, column: 0)
+        let explicitBrightColor = renderedForeground(in: view, column: 1)
+        let expectedBaseColor = TTColor.make(color: Color.xtermColors[1])
+        let expectedBrightColor = TTColor.make(color: Color.xtermColors[9])
+
+        #expect(boldBaseColor?.isEqual(expectedBaseColor) == true)
+        #expect(explicitBrightColor?.isEqual(expectedBrightColor) == true)
+        #expect(boldBaseColor?.isEqual(explicitBrightColor) == false)
+    }
+
+    private func renderedForeground(in view: TerminalView, column: Int) -> NSColor? {
+        guard let cell = view.terminal.getCharData(col: column, row: 0) else {
+            return nil
+        }
+        return view.getAttributes(cell.attribute, withUrl: false)?[.foregroundColor] as? NSColor
     }
 }
 #endif
