@@ -356,7 +356,7 @@ extension TerminalView {
             // to their base variants and rely on the bold font.
             if useBrightColors {
                 let promotesBoldColor = isBold && boldUsesBrightColors
-                midx = ansi < 7 ? (Int (ansi) + (promotesBoldColor ? 8 : 0)) : Int (ansi)
+                midx = ansi < 8 ? (Int (ansi) + (promotesBoldColor ? 8 : 0)) : Int (ansi)
             } else {
                 midx = ansi > 7 ? (Int (ansi) - 8) : Int(ansi)
             }

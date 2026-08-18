@@ -241,7 +241,7 @@ final class ColorTests {
     @Test func testBoldBaseColorUsesBrightVariantByDefault() {
         let view = TerminalView(frame: CGRect(x: 0, y: 0, width: 320, height: 160))
         view.installColors(Color.xtermColors)
-        view.terminal.feed(text: "\u{001B}[1;31mA\u{001B}[0;91mB")
+        view.terminal.feed(text: "\u{001B}[1;37mA\u{001B}[0;97mB")
 
         let boldBaseColor = renderedForeground(in: view, column: 0)
         let explicitBrightColor = renderedForeground(in: view, column: 1)
@@ -253,17 +253,52 @@ final class ColorTests {
     @Test func testBoldBaseColorCanRemainDistinctFromExplicitBrightColor() {
         let view = TerminalView(frame: CGRect(x: 0, y: 0, width: 320, height: 160))
         view.installColors(Color.xtermColors)
-        view.boldUsesBrightColors = false
         view.terminal.feed(text: "\u{001B}[1;31mA\u{001B}[0;91mB")
 
+        let promotedColor = renderedForeground(in: view, column: 0)
+        view.boldUsesBrightColors = false
         let boldBaseColor = renderedForeground(in: view, column: 0)
         let explicitBrightColor = renderedForeground(in: view, column: 1)
         let expectedBaseColor = TTColor.make(color: Color.xtermColors[1])
         let expectedBrightColor = TTColor.make(color: Color.xtermColors[9])
 
+        #expect(promotedColor?.isEqual(expectedBrightColor) == true)
         #expect(boldBaseColor?.isEqual(expectedBaseColor) == true)
         #expect(explicitBrightColor?.isEqual(expectedBrightColor) == true)
         #expect(boldBaseColor?.isEqual(explicitBrightColor) == false)
+    }
+
+    @Test func testBoldBaseUnderlineColorHonorsRuntimeSettingInBothAttributePaths() throws {
+        let view = TerminalView(frame: CGRect(x: 0, y: 0, width: 320, height: 160))
+        view.installColors(Color.xtermColors)
+        view.terminal.feed(text: "\u{001B}[1;4;58;5;7mA")
+
+        let cell = try #require(view.terminal.getCharData(col: 0, row: 0))
+        let expectedBaseColor = TTColor.make(color: Color.xtermColors[7])
+        let expectedBrightColor = TTColor.make(color: Color.xtermColors[15])
+        let suppliedForeground = TTColor.make(color: Color.xtermColors[2])
+        let suppliedBackground = TTColor.make(color: Color.xtermColors[0])
+
+        let cachedBrightUnderline = renderedUnderline(for: cell.attribute, in: view)
+        let directBrightUnderline = view.getAttributedValue(
+            cell.attribute,
+            usingFg: suppliedForeground,
+            andBg: suppliedBackground
+        )?[.underlineColor] as? NSColor
+
+        view.boldUsesBrightColors = false
+
+        let cachedBaseUnderline = renderedUnderline(for: cell.attribute, in: view)
+        let directBaseUnderline = view.getAttributedValue(
+            cell.attribute,
+            usingFg: suppliedForeground,
+            andBg: suppliedBackground
+        )?[.underlineColor] as? NSColor
+
+        #expect(cachedBrightUnderline?.isEqual(expectedBrightColor) == true)
+        #expect(directBrightUnderline?.isEqual(expectedBrightColor) == true)
+        #expect(cachedBaseUnderline?.isEqual(expectedBaseColor) == true)
+        #expect(directBaseUnderline?.isEqual(expectedBaseColor) == true)
     }
 
     private func renderedForeground(in view: TerminalView, column: Int) -> NSColor? {
@@ -271,6 +306,10 @@ final class ColorTests {
             return nil
         }
         return view.getAttributes(cell.attribute, withUrl: false)?[.foregroundColor] as? NSColor
+    }
+
+    private func renderedUnderline(for attribute: Attribute, in view: TerminalView) -> NSColor? {
+        view.getAttributes(attribute, withUrl: false)?[.underlineColor] as? NSColor
     }
 }
 #endif
